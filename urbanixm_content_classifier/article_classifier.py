@@ -192,10 +192,14 @@ class ArticleClassificationTrainer(object):
 
         texts = Texts()
         if self.objective_type == ObjectiveType.ON_TOPIC or self.objective_type == ObjectiveType.QUOTABLE:
+            # We are traing a model for estimating if a web-page is on the general topic of urbanism
+            # or a model for estimating if an urbanism web-page is content rich (quotable)
             texts =  self.load_data_unlabelled(json_reader)
         elif self.objective_type == ObjectiveType.TOPICS and objective_label is not None:
+            # We are training a model for estimating if a web-page is on a sepecific urbanism topic
             texts = self.load_data_labelled(objective_label, json_reader)
         elif self.objective_type == ObjectiveType.PLACES and objective_label is not None:
+            # We are training a model for estimating if a web-page is talking about a specific plce
             texts = self.load_data_labelled(objective_label, json_reader)
         else:
             print(f"Unkonwn objective type or label: {self.objective_type}/{objective_label}")
@@ -248,12 +252,14 @@ class ArticleClassificationTrainer(object):
             else:
                 # Article is on topic
                 if objective_label in json_object[self.objective_type.value]["direct"]:
+                    # Article has been annotated directly on topic
                     texts.positive_direct.append(text)
                 elif objective_label in json_object[self.objective_type.value]["derived"]:
+                    # Article has been derived to be on topic
                     texts.positive_indirect.append(text)
                 else:
                     # Article is about urbanism but not on the desired objective label (topic or place)
-                    texts.positive_indirect.append(text)
+                    texts.negative_indirect.append(text)
         return texts
 
     def get_data_spit(self, texts: Texts) -> Dataset:
@@ -341,6 +347,10 @@ class ArticleClassificationTrainer(object):
         return dataset
 
     def train_model(self, texts: Texts) -> EvaluatedModel:
+        """
+        Takes a set of text objects and trains a model.
+        The model is evaluated along several metrics to get a complete understanding of the model performance.
+        """
 
         training_data = self.get_data_spit(texts)
 
