@@ -29,6 +29,7 @@ class ObjectiveType(Enum):
     QUOTE_TYPES = 'quote_types'
     QUOTE_TONES = 'quote_tones'
     QUOTE_TOPICS = 'quote_topics'
+    QUOTE_PLACES = 'quote_places'
 
 
 class CustomTrainer(Trainer):
@@ -87,7 +88,7 @@ class QuoteClassificationTrainer(object):
         parser.add_argument("--objective_type", 
                             type=str, 
                             required=True, 
-                            help="Objective: [quote_types, quote_tones, quote_topics]")
+                            help="Objective: [quote_types, quote_tones, quote_topics, quote_places]")
         args = parser.parse_args()
 
         # Initalize base model
