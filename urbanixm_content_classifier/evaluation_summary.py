@@ -100,18 +100,22 @@ class EvaluationSummarizer(object):
                     evaluation_report = json.load(fp)
                     model_evaluation['label'] = evaluation_report['objective_label']
 
-                    model_evaluation['instances_positive_train'] = evaluation_report['counts']['positive_train']
+                    model_evaluation['# pos. train'] = evaluation_report['counts']['positive_train']
+                    model_evaluation['# neg. train'] = evaluation_report['counts']['negative_train']
+                    model_evaluation['# pos. test'] = evaluation_report['counts']['positive_test']
+                    model_evaluation['# neg. test'] = evaluation_report['counts']['negative_test']
 
                     for evaluation in evaluation_report['evaluations']:
                         if evaluation['label'] == 'overall':
-                            model_evaluation['accuracy_overall_test'] = evaluation['evaluation']['test']['accuracy']
+                            model_evaluation['@ acc. train'] = evaluation['evaluation']['train']['accuracy']
+                            model_evaluation['@ acc. test'] = evaluation['evaluation']['test']['accuracy']
 
                     model_evaluations.append(model_evaluation)
                     fp.close()
 
         model_evaluations_df = pd.DataFrame(data=model_evaluations)
 
-        model_evaluations_df.sort_values(by='instances_positive_train', ascending=False, inplace=True)
+        model_evaluations_df.sort_values(by='# pos. train', ascending=False, inplace=True)
 
         self.report_file.write(model_evaluations_df.to_markdown(floatfmt=".2f"))
         self.report_file.write("\n\n")
