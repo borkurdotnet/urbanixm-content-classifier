@@ -1,0 +1,43 @@
+[project]
+name = "urbanixm-content-classifier"
+version = "0.1.0"
+description = "Content classifiers for Urbanixm"
+authors = [{ name = "Börkur Sigurbjörnsson", email = "borkur@borkur.net" }]
+requires-python = ">=3.13"
+readme = "README.md"
+dependencies = [
+    "accelerate==1.10.1",
+    "datasets==4.0.0",
+    "jsonlines==4.0.0",
+    "scikit-learn==1.7.2",
+    "scikit-multilearn==0.2.0",
+    "torch==2.8.0",
+    "transformers==4.56.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.12,<0.13",
+    "pyright>=1.1.405",
+    "pre-commit>=4.3.0,<5",
+    "pytest>=8.4.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.pyright]
+# Turn useful diagnostics up early
+reportUnknownVariableType = true
+reportUnknownMemberType = true
+reportUnknownArgumentType = true
+reportOptionalSubscript = true
+reportUnusedImport = "error"
+reportMissingTypeStubs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -172,7 +172,7 @@ class ArticleClassificationTrainer(object):
                                               "classifiers", 
                                               "models", 
                                               "final", 
-                                              f"article_models")
+                                              "article_models")
 
     def load_data(self, objective_label: str | None) -> Texts:
         """

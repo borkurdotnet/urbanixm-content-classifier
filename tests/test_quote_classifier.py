@@ -1,7 +1,7 @@
 import json
 import os
 import sys
-from urbanixm_content_classifier.quote_classifier import QuoteClassificationTrainer, ObjectiveType
+from urbanixm_content_classifier.quote_classifier import QuoteClassificationTrainer
 
 def test_train():
     """

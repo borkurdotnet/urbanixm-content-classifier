@@ -1,6 +1,7 @@
+from __future__ import annotations
 import argparse
 import csv
-from datasets import Dataset, DatasetDict
+from datasets import Dataset, DatasetDict  # type: ignore
 from datetime import datetime
 from enum import Enum
 import functools
@@ -10,14 +11,15 @@ import numpy as np
 import json
 import os
 import random
-from sklearn.metrics import f1_score
-from skmultilearn.model_selection import iterative_train_test_split
+from sklearn.metrics import f1_score  # type: ignore
+from skmultilearn.model_selection import iterative_train_test_split  # type: ignore
 import torch
 import torch.nn.functional as F
 from transformers.models.auto.modeling_auto import AutoModelForSequenceClassification
 from transformers import AutoTokenizer
 from transformers.training_args import TrainingArguments
 from transformers.trainer import Trainer
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from typing import Any
 
 # Set up logging
@@ -37,7 +39,7 @@ class CustomTrainer(Trainer):
     Custom trainer class to be able to pass label weights and calculate mutilabel loss
     """
 
-    def __init__(self, label_weights, device, **kwargs):
+    def __init__(self, label_weights: torch.Tensor, device: torch.device, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.label_weights = label_weights
         self.device = device
@@ -129,7 +131,7 @@ class QuoteClassificationTrainer(object):
 
 
     @staticmethod
-    def load_text_and_labels(file_path: str) -> tuple[list[str], tuple[Any], np.ndarray]:
+    def load_text_and_labels(file_path: str) -> tuple[list[str], tuple[Any, ...], np.ndarray[Any, np.dtype[np.int_]]]:
         """
         Processes a training/test/evaluation data file and returns:
         - label_names: Ordered list of strings representing the names of the classification labels
@@ -165,7 +167,7 @@ class QuoteClassificationTrainer(object):
         return label_names, text, labels
 
 
-    def load_data(self) -> tuple[np.ndarray, torch.Tensor, DatasetDict]:
+    def load_data(self) -> tuple[np.ndarray[Any, np.dtype[np.int_]], torch.Tensor, DatasetDict]:
         """
         Loads training data from a csv file of the format
         text, label-1, label-2, ...
@@ -186,14 +188,14 @@ class QuoteClassificationTrainer(object):
 
         # create hf dataset
         dataset_dict = DatasetDict({
-            'train': Dataset.from_dict({'text': x_train, 'labels': y_train}),
-            'eval': Dataset.from_dict({'text': x_val, 'labels': y_val})
+            'train': Dataset.from_dict({'text': x_train, 'labels': y_train.tolist()}),  # type: ignore
+            'eval': Dataset.from_dict({'text': x_val, 'labels': y_val.tolist()})  # type: ignore
         })
 
         return labels, label_weights, dataset_dict
 
     @staticmethod
-    def tokenize_examples(examples: DatasetDict, tokenizer):
+    def tokenize_examples(examples: DatasetDict, tokenizer: PreTrainedTokenizerBase):
             tokenized_inputs = tokenizer(examples['text'])
             tokenized_inputs['labels'] = examples['labels']
             return tokenized_inputs
@@ -209,21 +211,21 @@ class QuoteClassificationTrainer(object):
         threshold = 0.5
 
         # save model metadata
-        model_metadata = {
+        model_metadata: dict[str, Any] = {
             "timestamp": datetime.now().isoformat(),
             "label_names": label_names,
             "sample_size": {
                 "training": len(tokenized_dataset['train']),
                 "evaluation": len(tokenized_dataset['eval']),
             },
-            "metrics_training": trainer.evaluate(),
+            "metrics_training": trainer.evaluate(),  # type: ignore
             "metrics_labels": {},
             "samples": []
         }
 
         # Evaluate model
         prediction = trainer.predict(tokenized_dataset['eval']) # type: ignore
-        predicted_logits = prediction.predictions
+        predicted_logits = prediction.predictions # type: ignore
         predicted_probs = torch.sigmoid(torch.tensor(predicted_logits))
 
         # Initialize per label evaluation
@@ -236,8 +238,8 @@ class QuoteClassificationTrainer(object):
 
         for idx, sample in enumerate(dataset['eval']):
             assert isinstance(sample, dict)
-            true_labels = []
-            predicted_labels = []
+            true_labels: list[str] = []
+            predicted_labels: list[str] = []
             for label_idx, label_name in enumerate(label_names):
                 if sample['labels'][label_idx] == 1.0:
                     true_labels.append(label_name)
