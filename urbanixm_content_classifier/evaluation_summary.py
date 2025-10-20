@@ -105,10 +105,39 @@ class EvaluationSummarizer(object):
                     model_evaluation['# pos. test'] = evaluation_report['counts']['positive_test']
                     model_evaluation['# neg. test'] = evaluation_report['counts']['negative_test']
 
+                    acc_pos_train = 0.0
+                    acc_neg_train = 0.0
+                    acc_pos_train_count = 0
+                    acc_neg_train_count = 0
+                    acc_pos_test = 0.0
+                    acc_neg_test = 0.0
+                    acc_pos_test_count = 0
+                    acc_neg_test_count = 0
                     for evaluation in evaluation_report['evaluations']:
                         if evaluation['label'] == 'overall':
                             model_evaluation['@ acc. train'] = evaluation['evaluation']['train']['accuracy']
                             model_evaluation['@ acc. test'] = evaluation['evaluation']['test']['accuracy']
+
+                        if evaluation['label'] in ['positive_direct', 'positive_indirect']:
+                            acc_pos_train += evaluation['evaluation']['train']['count'] \
+                                * evaluation['evaluation']['train']['accuracy']
+                            acc_pos_train_count += evaluation['evaluation']['train']['count']
+                            acc_pos_test += evaluation['evaluation']['test']['count'] \
+                                * evaluation['evaluation']['test']['accuracy']
+                            acc_pos_test_count += evaluation['evaluation']['test']['count']
+
+                        if evaluation['label'] in ['negative_direct', 'negative_indirect']:
+                            acc_neg_train += evaluation['evaluation']['train']['count'] \
+                                * evaluation['evaluation']['train']['accuracy']
+                            acc_neg_train_count += evaluation['evaluation']['train']['count']
+                            acc_neg_test += evaluation['evaluation']['test']['count'] \
+                                * evaluation['evaluation']['test']['accuracy']
+                            acc_neg_test_count += evaluation['evaluation']['test']['count']
+
+                    model_evaluation['@ acc. pos. train'] = acc_pos_train / acc_pos_train_count
+                    model_evaluation['@ acc. pos. test'] = acc_pos_test / acc_pos_test_count
+                    model_evaluation['@ acc. neg. train'] = acc_neg_train / acc_neg_train_count
+                    model_evaluation['@ acc. neg. test'] = acc_neg_test / acc_neg_test_count
 
                     model_evaluations.append(model_evaluation)
                     fp.close()
