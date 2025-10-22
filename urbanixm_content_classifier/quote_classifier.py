@@ -16,7 +16,7 @@ from skmultilearn.model_selection import iterative_train_test_split  # type: ign
 import torch
 import torch.nn.functional as F
 from transformers.models.auto.modeling_auto import AutoModelForSequenceClassification
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, BatchEncoding
 from transformers.training_args import TrainingArguments
 from transformers.trainer import Trainer
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
@@ -40,7 +40,7 @@ class CustomTrainer(Trainer):
     """
 
     def __init__(self, label_weights: torch.Tensor, device: torch.device, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+        super().__init__(**kwargs)  # type: ignore
         self.label_weights = label_weights
         self.device = device
             
@@ -195,8 +195,9 @@ class QuoteClassificationTrainer(object):
         return labels, label_weights, dataset_dict
 
     @staticmethod
-    def tokenize_examples(examples: DatasetDict, tokenizer: PreTrainedTokenizerBase):
-            tokenized_inputs = tokenizer(examples['text'])
+    def tokenize_examples(examples: DatasetDict, 
+                          tokenizer: PreTrainedTokenizerBase) -> BatchEncoding:
+            tokenized_inputs = tokenizer(examples['text'])  # type: ignore
             tokenized_inputs['labels'] = examples['labels']
             return tokenized_inputs
 
@@ -236,7 +237,7 @@ class QuoteClassificationTrainer(object):
                 "fn": 0, # False-negative: true but not predicted
             }
 
-        for idx, sample in enumerate(dataset['eval']):
+        for idx, sample in enumerate(dataset['eval']):  # type: ignore
             assert isinstance(sample, dict)
             true_labels: list[str] = []
             predicted_labels: list[str] = []
@@ -299,30 +300,32 @@ class QuoteClassificationTrainer(object):
         logging.info(f"Number of labels: {len(self.label_names)}")
 
         # Load the tokenizer for the specified model
-        tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(  # type: ignore
             self.base_model_name,
         )
         # Ensure tokenizer has a pad token
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token or '[PAD]'
-        tokenized_ds = ds.map(functools.partial(self.tokenize_examples, tokenizer=tokenizer), batched=True)
-        tokenized_ds = tokenized_ds.with_format('torch')
+        if tokenizer.pad_token is None:  # type: ignore
+            tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token or '[PAD]'  # type: ignore
+        tokenized_ds: DatasetDict = ds.map(functools.partial(self.tokenize_examples,  # type: ignore
+                                                             tokenizer=tokenizer), 
+                                                             batched=True)
+        tokenized_ds = tokenized_ds.with_format(type = 'torch')  # type: ignore
 
         # Load the Hugging Face model on CPU first to avoid init_empty_weights error
-        model = AutoModelForSequenceClassification.from_pretrained(
+        model = AutoModelForSequenceClassification.from_pretrained(  # type: ignore
             self.base_model_name,
             num_labels=labels.shape[1],
         )
-        model = model.to(self.device)
-        model.config.pad_token_id = tokenizer.pad_token_id
-        model.train()
+        model = model.to(self.device)  # type: ignore
+        model.config.pad_token_id = tokenizer.pad_token_id  # type: ignore
+        model.train()  # type: ignore
 
         # define custom batch preprocessor
         def collate_fn(batch, tokenizer):
             dict_keys = ['input_ids', 'attention_mask', 'labels']
-            d: dict[str, Any] = {k: [dic[k] for dic in batch] for k in dict_keys}
+            d: dict[str, Any] = {k: [dic[k] for dic in batch] for k in dict_keys}  # type: ignore
             d['input_ids'] = torch.nn.utils.rnn.pad_sequence(
-                d['input_ids'], batch_first=True, padding_value=tokenizer.pad_token_id
+                d['input_ids'], batch_first=True, padding_value=tokenizer.pad_token_id  # type: ignore
             ).to(self.device)  # Move to device
             d['attention_mask'] = torch.nn.utils.rnn.pad_sequence(
                 d['attention_mask'], batch_first=True, padding_value=0
@@ -331,8 +334,8 @@ class QuoteClassificationTrainer(object):
             return d
 
         # define which metrics to compute for evaluation
-        def compute_metrics(p):
-            predictions, labels = p
+        def compute_metrics(p: tuple[np.ndarray, np.ndarray]) -> dict[str, Any]:
+            predictions, labels = p  # type: ignore
             f1_micro = f1_score(labels, predictions > 0, average = 'micro')
             f1_macro = f1_score(labels, predictions > 0, average = 'macro')
             f1_weighted = f1_score(labels, predictions > 0, average = 'weighted')
@@ -368,12 +371,12 @@ class QuoteClassificationTrainer(object):
             label_weights=torch.tensor(label_weights, device=self.device)
         )
 
-        trainer.train()
+        trainer.train()  # type: ignore
 
         # Save model
         logging.info(f"Saving model to {self.output_model_path}")
         trainer.save_model(self.output_model_path)
-        tokenizer.save_pretrained(self.output_model_path)
+        tokenizer.save_pretrained(self.output_model_path)  # type: ignore
 
         # Save model metadata
         logging.info(f"Saving model metadata to {self.output_meta_path}")

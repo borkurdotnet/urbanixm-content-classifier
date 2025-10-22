@@ -9,12 +9,13 @@ import jsonlines
 import logging
 import os
 import pandas as pd
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.feature_extraction.text import TfidfTransformer
-from sklearn.model_selection import GridSearchCV
-from sklearn.pipeline import Pipeline
-from sklearn.svm import SVC
-from sklearn.utils import shuffle
+from pandas import DataFrame
+from sklearn.feature_extraction.text import CountVectorizer  # type: ignore
+from sklearn.feature_extraction.text import TfidfTransformer  # type: ignore
+from sklearn.model_selection import GridSearchCV  # type: ignore
+from sklearn.pipeline import Pipeline  # type: ignore
+from sklearn.svm import SVC  # type: ignore
+from sklearn.utils import shuffle  # type: ignore
 from typing import Any
 
 # Set up logging
@@ -33,10 +34,10 @@ class ObjectiveType(Enum):
 
 @dataclass
 class Texts:
-    positive_direct: list[str] = field(default_factory=list)
-    positive_indirect: list[str] = field(default_factory=list)
-    negative_direct: list[str] = field(default_factory=list)
-    negative_indirect: list[str] = field(default_factory=list)
+    positive_direct: list[str] = field(default_factory=list)  # type: ignore
+    positive_indirect: list[str] = field(default_factory=list)  # type: ignore
+    negative_direct: list[str] = field(default_factory=list)  # type: ignore
+    negative_indirect: list[str] = field(default_factory=list)  # type: ignore
 
 @dataclass
 class DatasetCounts:
@@ -219,7 +220,8 @@ class ArticleClassificationTrainer(object):
         """
         texts = Texts()
         for json_object in json_reader:
-            text = json_object['content']
+            text: str = json_object['content']
+
             if json_object['off_topic']:
                 # Article is off topic
                 texts.negative_direct.append(text)
@@ -245,7 +247,7 @@ class ArticleClassificationTrainer(object):
         """
         texts = Texts()
         for json_object in json_reader:
-            text = json_object['content']
+            text: str = json_object['content']
             if json_object['off_topic']:
                 # Article is not about urbanism
                 texts.negative_direct.append(text)
@@ -293,7 +295,7 @@ class ArticleClassificationTrainer(object):
             pos_train_df['d/i'] = 'direct'
 
         # Positive indirect samples (with 75% weight)
-        posi_train_df = pd.DataFrame(data=texts.positive_indirect, columns=['text'])
+        posi_train_df: DataFrame = DataFrame(data=texts.positive_indirect, columns=['text'])
         if len(texts.positive_indirect) > 0:
             posi_train_df['label'] = 1
             posi_train_df['weight'] = 0.75
@@ -301,12 +303,13 @@ class ArticleClassificationTrainer(object):
             posi_train_df['d/i'] = 'indirect'
 
         # Positive train/test split
-        pos_train_df = pd.concat([pos_train_df, posi_train_df], ignore_index=True)
-        pos_test_df = pos_train_df.sample(n=pos_test_count)
+        pos_train_df: DataFrame = pd.concat([pos_train_df, posi_train_df], 
+                                            ignore_index=True)
+        pos_test_df = pos_train_df.sample(n=pos_test_count)  # type: ignore
         pos_train_df = pos_train_df.drop(pos_test_df.index)
 
         # Negative direct samples
-        neg_train_df = pd.DataFrame(data=texts.negative_direct, columns=['text'])
+        neg_train_df = DataFrame(data=texts.negative_direct, columns=['text'])
         if len(texts.negative_direct) > 0:
             neg_train_df['label'] = 0
             neg_train_df['weight'] = pos_neg_ratio
@@ -314,7 +317,7 @@ class ArticleClassificationTrainer(object):
             neg_train_df['d/i'] = 'direct'
 
         # Negative indirect samples (with weight equal to the ratio betwee positive and negative data)
-        negi_train_df = pd.DataFrame(data=texts.negative_indirect, columns=['text'])
+        negi_train_df = DataFrame(data=texts.negative_indirect, columns=['text'])
         if len(texts.negative_indirect) > 0:
             negi_train_df['label'] = 0
             negi_train_df['weight'] = pos_neg_ratio
@@ -322,9 +325,10 @@ class ArticleClassificationTrainer(object):
             negi_train_df['d/i'] = 'indirect'
 
         # Negative train/test split
-        neg_train_df = pd.concat([neg_train_df, negi_train_df], ignore_index=True)
+        neg_train_df: DataFrame = pd.concat([neg_train_df, negi_train_df], 
+                                            ignore_index=True)
         if neg_train_df.shape[0] > pos_test_count:
-            neg_test_df = neg_train_df.sample(n=pos_test_count)
+            neg_test_df = neg_train_df.sample(n=pos_test_count)  # type: ignore
         else:
             neg_test_df = neg_train_df.copy()
         neg_train_df = neg_train_df.drop(neg_test_df.index)
@@ -354,7 +358,7 @@ class ArticleClassificationTrainer(object):
 
         training_data = self.get_data_spit(texts)
 
-        parameters = {
+        parameters: dict[str, Any] = {
             'vect__ngram_range': [(1, 1)],
             'tfidf__use_idf': [True],
         }
@@ -363,9 +367,9 @@ class ArticleClassificationTrainer(object):
                              ('tfidf', TfidfTransformer()),
                              ('clf', SVC(probability=True))
                              ])
-        gs_clf = GridSearchCV(text_clf, parameters, n_jobs=-1)
+        gs_clf = GridSearchCV(text_clf, parameters, n_jobs=-1)  # type: ignore
 
-        gs_clf = gs_clf.fit(list(training_data.data_train['text']),
+        gs_clf = gs_clf.fit(list(training_data.data_train['text']),  # type: ignore
                             training_data.data_train['label'],
                             clf__sample_weight=training_data.data_train['weight'])
 
@@ -376,12 +380,12 @@ class ArticleClassificationTrainer(object):
             label='overall',
             evaluation = Evaluation(
                 train=EvaluationResult(
-                    accuracy=float(gs_clf.score(list(training_data.data_train['text']),
+                    accuracy=float(gs_clf.score(list(training_data.data_train['text']),  # type: ignore
                                                 training_data.data_train['label'])),
                     count=training_data.data_train.shape[0]
                 ),
                 test=EvaluationResult(
-                    accuracy=float(gs_clf.score(list(training_data.data_test['text']),
+                    accuracy=float(gs_clf.score(list(training_data.data_test['text']),  # type: ignore
                                                 training_data.data_test['label'])),
                     count=training_data.data_test.shape[0]
                 )
@@ -403,13 +407,13 @@ class ArticleClassificationTrainer(object):
                             label=f"{sign}_{direction}",
                             evaluation=Evaluation(
                                 train=EvaluationResult(
-                                    accuracy=float(gs_clf.score(list(train_sub['text']), 
+                                    accuracy=float(gs_clf.score(list(train_sub['text']),  # type: ignore
                                                           train_sub['label']))
                                                           if train_sub.shape[0] > 0 else 0.0,
                                     count=train_sub.shape[0]
                                 ),
                                 test=EvaluationResult(
-                                    accuracy=float(gs_clf.score(list(test_sub['text']),
+                                    accuracy=float(gs_clf.score(list(test_sub['text']),  # type: ignore
                                                                 test_sub['label'])) 
                                                                 if test_sub.shape[0] > 0 else 0.0,
                                     count=test_sub.shape[0]
@@ -434,7 +438,7 @@ class ArticleClassificationTrainer(object):
         """
 
         # Save classifier meta-data
-        metadata =  {
+        metadata: dict[str, Any] = {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'objective_type': self.objective_type.value,
             'objective_label': objective_label,

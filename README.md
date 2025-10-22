@@ -56,18 +56,17 @@ a GenAI engine to create a fake data-set for training quote type classification.
 ## Initial setup
 
 ```
-python3.12 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-pip install -e .
+uv sync
 ```
 
-## Test
+## Pre-commit
 
 The unit tests will train a classifier using demo data.
 
 ```
-pytest
+uv run ruff check .
+uv run pyright .
+uv run pytest
 ```
 
 Note that the data used in the tests is not actual set of curated quotes from the web, 
