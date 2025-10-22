@@ -109,7 +109,7 @@ class QuoteClassificationTrainer(object):
         )
         args = parser.parse_args()
 
-        # Initalize base model
+        # Initialize base model
         if args.base_model:
             self.base_model_name = args.base_model
 

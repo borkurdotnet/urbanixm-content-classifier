@@ -1,14 +1,17 @@
 import json
 import os
 import sys
+import pytest
 from urbanixm_content_classifier.quote_classifier import QuoteClassificationTrainer
 
 
+@pytest.mark.slow
 def test_train():
     """
     Test the training of a classifier
 
-    Warning: This test can take a while (~30s)!
+    Warning: This test can take a while (~30s) and downloads models!
+    Run with: uv run pytest -m slow
     """
 
     # Clean existing model

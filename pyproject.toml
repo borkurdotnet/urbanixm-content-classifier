@@ -49,3 +49,7 @@ reportMissingTypeStubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselected by default)"
+]
+addopts = "-m 'not slow'"
