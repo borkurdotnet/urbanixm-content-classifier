@@ -1,5 +1,7 @@
 # Urbanixm Content Classifiers
 
+[![CI](https://github.com/borkurdotnet/urbanixm-content-classifier/workflows/CI/badge.svg)](https://github.com/borkurdotnet/urbanixm-content-classifier/actions)
+
 This repository contains code used to train and deplpoy content classifiers
 used in [Urbanixm](https://www.urbanixm.com/) — the urban knowledge discovery engine.
 
