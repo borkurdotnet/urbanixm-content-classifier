@@ -24,9 +24,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-POSITIVE_COUNT_MIN = 20
 POSITIVE_TEST_COUNT_MIN = 10
-MINIMUM_TRAINING_INSTANCES = 25
 
 
 class ObjectiveType(Enum):
@@ -51,8 +49,10 @@ class DatasetCounts:
     negative_direct: int
     negative_indirect: int
     positive_train: int
+    positive_validation: int
     positive_test: int
     negative_train: int
+    negative_validation: int
     negative_test: int
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,8 +63,10 @@ class DatasetCounts:
             "negative_direct": self.negative_direct,
             "negative_indirect": self.negative_indirect,
             "positive_train": self.positive_train,
+            "positive_validation": self.positive_validation,
             "positive_test": self.positive_test,
             "negative_train": self.negative_train,
+            "negative_validation": self.negative_validation,
             "negative_test": self.negative_test,
         }
 
@@ -73,8 +75,8 @@ class DatasetCounts:
 class Dataset:
     counts: DatasetCounts
     data_train: pd.DataFrame
+    data_validation: pd.DataFrame
     data_test: pd.DataFrame
-    # FIXME: Add validation
 
 
 @dataclass
@@ -86,12 +88,17 @@ class EvaluationResult:
 @dataclass
 class Evaluation:
     train: EvaluationResult
+    validation: EvaluationResult
     test: EvaluationResult
 
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
         return {
             "train": {"accuracy": self.train.accuracy, "count": self.train.count},
+            "validation": {
+                "accuracy": self.validation.accuracy,
+                "count": self.validation.count,
+            },
             "test": {"accuracy": self.test.accuracy, "count": self.test.count},
         }
 
@@ -363,12 +370,13 @@ class ArticleClassificationTrainer(object):
             - __d/i__ 'direct' or 'indirect'
         """
 
-        # Choose test count as 10% of positive cases
-        pos_test_count = max(
-            POSITIVE_TEST_COUNT_MIN,
-            int(0.1 * (len(texts.positive_direct) + len(texts.positive_indirect))),
+        # Reserve roughly 10% of positive cases for each holdout set.
+        positive_count = len(texts.positive_direct) + len(texts.positive_indirect)
+        pos_holdout_count = min(
+            max(POSITIVE_TEST_COUNT_MIN, int(0.1 * positive_count)),
+            max((positive_count - 1) // 2, 0),
         )
-        pos_neg_ratio = (len(texts.positive_direct) + len(texts.positive_indirect)) / (
+        pos_neg_ratio = positive_count / (
             len(texts.negative_direct) + len(texts.negative_indirect)
         )
 
@@ -390,11 +398,13 @@ class ArticleClassificationTrainer(object):
             posi_train_df["p/n"] = "positive"
             posi_train_df["d/i"] = "indirect"
 
-        # Positive train/test split
+        # Positive train/validation/test split
         pos_train_df: DataFrame = pd.concat(
             [pos_train_df, posi_train_df], ignore_index=True
         )
-        pos_test_df = pos_train_df.sample(n=pos_test_count)  # type: ignore
+        pos_validation_df = pos_train_df.sample(n=pos_holdout_count)  # type: ignore
+        pos_train_df = pos_train_df.drop(pos_validation_df.index)
+        pos_test_df = pos_train_df.sample(n=pos_holdout_count)  # type: ignore
         pos_train_df = pos_train_df.drop(pos_test_df.index)
 
         # Negative direct samples
@@ -405,7 +415,7 @@ class ArticleClassificationTrainer(object):
             neg_train_df["p/n"] = "negative"
             neg_train_df["d/i"] = "direct"
 
-        # Negative indirect samples (with weight equal to the ratio betwee positive and negative data)
+        # Negative indirect samples (with weight equal to the ratio between positive and negative data)
         negi_train_df = DataFrame(data=texts.negative_indirect, columns=["text"])
         if len(texts.negative_indirect) > 0:
             negi_train_df["label"] = 0
@@ -413,14 +423,16 @@ class ArticleClassificationTrainer(object):
             negi_train_df["p/n"] = "negative"
             negi_train_df["d/i"] = "indirect"
 
-        # Negative train/test split
+        # Negative train/validation/test split
         neg_train_df: DataFrame = pd.concat(
             [neg_train_df, negi_train_df], ignore_index=True
         )
-        if neg_train_df.shape[0] > pos_test_count:
-            neg_test_df = neg_train_df.sample(n=pos_test_count)  # type: ignore
-        else:
-            neg_test_df = neg_train_df.copy()
+        neg_holdout_count = min(
+            pos_holdout_count, max((neg_train_df.shape[0] - 1) // 2, 0)
+        )
+        neg_validation_df = neg_train_df.sample(n=neg_holdout_count)  # type: ignore
+        neg_train_df = neg_train_df.drop(neg_validation_df.index)
+        neg_test_df = neg_train_df.sample(n=neg_holdout_count)  # type: ignore
         neg_train_df = neg_train_df.drop(neg_test_df.index)
 
         dataset = Dataset(
@@ -430,11 +442,16 @@ class ArticleClassificationTrainer(object):
                 negative_direct=len(texts.negative_direct),
                 negative_indirect=len(texts.negative_indirect),
                 positive_train=pos_train_df.shape[0],
-                positive_test=pos_test_count,
+                positive_validation=pos_validation_df.shape[0],
+                positive_test=pos_test_df.shape[0],
                 negative_train=neg_train_df.shape[0],
+                negative_validation=neg_validation_df.shape[0],
                 negative_test=neg_test_df.shape[0],
             ),
             data_train=pd.DataFrame(shuffle(pd.concat([pos_train_df, neg_train_df]))),
+            data_validation=pd.DataFrame(
+                shuffle(pd.concat([pos_validation_df, neg_validation_df]))
+            ),
             data_test=pd.DataFrame(shuffle(pd.concat([pos_test_df, neg_test_df]))),
         )
 
@@ -483,6 +500,15 @@ class ArticleClassificationTrainer(object):
                     ),
                     count=training_data.data_train.shape[0],
                 ),
+                validation=EvaluationResult(
+                    accuracy=float(
+                        gs_clf.score(  # type: ignore
+                            list(training_data.data_validation["text"]),
+                            training_data.data_validation["label"],
+                        )
+                    ),
+                    count=training_data.data_validation.shape[0],
+                ),
                 test=EvaluationResult(
                     accuracy=float(
                         gs_clf.score(  # type: ignore
@@ -507,6 +533,10 @@ class ArticleClassificationTrainer(object):
                     training_data.data_test["p/n"] == sign
                 ]
                 test_sub = test_sub[test_sub["d/i"] == direction]
+                validation_sub = training_data.data_validation[
+                    training_data.data_validation["p/n"] == sign
+                ]
+                validation_sub = validation_sub[validation_sub["d/i"] == direction]
 
                 if train_sub.shape[0] > 0:
                     evaluation = LabelledEvaluation(
@@ -522,6 +552,17 @@ class ArticleClassificationTrainer(object):
                                 if train_sub.shape[0] > 0
                                 else 0.0,
                                 count=train_sub.shape[0],
+                            ),
+                            validation=EvaluationResult(
+                                accuracy=float(
+                                    gs_clf.score(  # type: ignore
+                                        list(validation_sub["text"]),
+                                        validation_sub["label"],
+                                    )
+                                )
+                                if validation_sub.shape[0] > 0
+                                else 0.0,
+                                count=validation_sub.shape[0],
                             ),
                             test=EvaluationResult(
                                 accuracy=float(
@@ -614,7 +655,7 @@ class ArticleClassificationTrainer(object):
                 logging.info(
                     f"Building model for {topic_label} ({training_instances} instances)"
                 )
-                if training_instances < MINIMUM_TRAINING_INSTANCES:
+                if training_instances < 3 * POSITIVE_TEST_COUNT_MIN:
                     logging.warning(
                         "Topic has insufficient training data: {}".format(topic_label)
                     )
@@ -634,7 +675,7 @@ class ArticleClassificationTrainer(object):
                 logging.info(
                     f"Building model for {place_label} ({training_instances} instances)"
                 )
-                if training_instances < MINIMUM_TRAINING_INSTANCES:
+                if training_instances < 3 * POSITIVE_TEST_COUNT_MIN:
                     logging.warning(
                         "Place has insufficient training data: {}".format(place_label)
                     )

@@ -5,6 +5,7 @@ from pathlib import Path
 from urbanixm_content_classifier.article_classifier import (
     ArticleClassificationTrainer,
     ObjectiveType,
+    Texts,
 )
 
 
@@ -53,3 +54,36 @@ def test_load_data_joins_labels_by_url_across_batches(tmp_path: Path) -> None:
 
     assert texts.positive_direct == ["first", "third"]
     assert texts.negative_direct == ["second", "fourth"]
+
+
+def test_get_data_split_includes_validation_set() -> None:
+    trainer = ArticleClassificationTrainer()
+    texts = Texts(
+        positive_direct=[f"positive-{index}" for index in range(100)],
+        negative_direct=[f"negative-{index}" for index in range(100)],
+    )
+
+    dataset = trainer.get_data_spit(texts)
+
+    assert dataset.counts.positive_train == 80
+    assert dataset.counts.positive_validation == 10
+    assert dataset.counts.positive_test == 10
+    assert dataset.counts.negative_train == 80
+    assert dataset.counts.negative_validation == 10
+    assert dataset.counts.negative_test == 10
+    assert len(dataset.data_train) == 160
+    assert len(dataset.data_validation) == 20
+    assert len(dataset.data_test) == 20
+
+    split_texts = [
+        set(dataset.data_train["text"]),
+        set(dataset.data_validation["text"]),
+        set(dataset.data_test["text"]),
+    ]
+    assert split_texts[0].isdisjoint(split_texts[1])
+    assert split_texts[0].isdisjoint(split_texts[2])
+    assert split_texts[1].isdisjoint(split_texts[2])
+    assert set.union(*split_texts) == {  # type: ignore
+        *(f"positive-{index}" for index in range(100)),
+        *(f"negative-{index}" for index in range(100)),
+    }
