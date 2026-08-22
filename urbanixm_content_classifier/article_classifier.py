@@ -8,6 +8,7 @@ import pickle
 import jsonlines
 import logging
 import os
+from pathlib import Path
 import pandas as pd
 from pandas import DataFrame
 from sklearn.feature_extraction.text import CountVectorizer  # type: ignore
@@ -16,7 +17,7 @@ from sklearn.model_selection import GridSearchCV  # type: ignore
 from sklearn.pipeline import Pipeline  # type: ignore
 from sklearn.svm import SVC  # type: ignore
 from sklearn.utils import shuffle  # type: ignore
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 # Set up logging
 logging.basicConfig(
@@ -122,7 +123,7 @@ class EvaluatedModel:
 class ArticleClassificationTrainer(object):
     data_dir: str
     objective_type: ObjectiveType
-    training_data_path: str
+    training_data_dir: str
     training_metadata_path: str
     output_model_path: str
 
@@ -164,9 +165,9 @@ class ArticleClassificationTrainer(object):
             exit(1)
         self.objective_type = ObjectiveType(args.objective_type)
 
-        # Set training data path
-        self.training_data_path = os.path.join(
-            self.data_dir, "classifiers", "training-data", "articles.jsonl.gz"
+        # Set training data directory
+        self.training_data_dir = os.path.join(
+            self.data_dir, "classifiers", "training-data", "articles"
         )
         self.training_metadata_path = os.path.join(
             self.data_dir, "classifiers", "training-data", "articles_meta.json"
@@ -184,53 +185,117 @@ class ArticleClassificationTrainer(object):
         :param objective_label: The topic or place label, when appropriate
         """
 
-        # Load the training data
-        if os.path.exists(self.training_data_path):
-            fp = gzip.open(self.training_data_path)
-        else:
-            self.training_data_path = self.training_data_path.removesuffix(".gz")
-            fp = open(self.training_data_path)
-
-        json_reader = jsonlines.Reader(fp)
-
         texts = Texts()
         if (
             self.objective_type == ObjectiveType.ON_TOPIC
             or self.objective_type == ObjectiveType.QUOTABLE
         ):
-            # We are traing a model for estimating if a web-page is on the general topic of urbanism
+            # We are training a model for estimating if a web-page is on the general topic of urbanism
             # or a model for estimating if an urbanism web-page is content rich (quotable)
-            texts = self.load_data_unlabelled(json_reader)
+            texts = self.load_data_unlabelled(self.iter_training_records())
         elif (
             self.objective_type == ObjectiveType.TOPICS and objective_label is not None
         ):
-            # We are training a model for estimating if a web-page is on a sepecific urbanism topic
-            texts = self.load_data_labelled(objective_label, json_reader)
+            # We are training a model for estimating if a web-page is on a specific urbanism topic
+            texts = self.load_data_labelled(
+                objective_label, self.iter_training_records()
+            )
         elif (
             self.objective_type == ObjectiveType.PLACES and objective_label is not None
         ):
             # We are training a model for estimating if a web-page is talking about a specific plce
-            texts = self.load_data_labelled(objective_label, json_reader)
+            texts = self.load_data_labelled(
+                objective_label, self.iter_training_records()
+            )
         else:
             print(
-                f"Unkonwn objective type or label: {self.objective_type}/{objective_label}"
+                f"Unknown objective type or label: {self.objective_type}/{objective_label}"
             )
 
-        json_reader.close()
-        fp.close()
         return texts
 
-    def load_data_unlabelled(self, json_reader: jsonlines.Reader) -> Texts:
+    def iter_training_records(self) -> Iterator[dict[str, Any]]:
+        training_data_dir = Path(self.training_data_dir)
+        content_paths: dict[str, Path] = {}
+
+        batch_paths = [
+            *training_data_dir.glob("articles_*.jsonl"),
+            *training_data_dir.glob("articles_*.jsonl.gz"),
+        ]
+        for path in sorted(batch_paths):
+            filename = path.name.removesuffix(".gz").removesuffix(".jsonl")
+            if filename.endswith("_labels"):
+                continue
+            if filename in content_paths:
+                raise ValueError(f"Multiple content files found for batch {filename}")
+            content_paths[filename] = path
+
+        if not content_paths:
+            raise FileNotFoundError(f"No article batches found in {training_data_dir}")
+
+        seen_urls: set[str] = set()
+        for batch_name, content_path in content_paths.items():
+            label_paths = [
+                path
+                for path in (
+                    training_data_dir / f"{batch_name}_labels.jsonl",
+                    training_data_dir / f"{batch_name}_labels.jsonl.gz",
+                )
+                if path.exists()
+            ]
+            if len(label_paths) != 1:
+                raise FileNotFoundError(
+                    f"Expected one labels file for {content_path.name}, "
+                    f"found {len(label_paths)}"
+                )
+
+            labels_by_url: dict[str, dict[str, Any]] = {}
+            with self.open_jsonlines(label_paths[0]) as label_reader:
+                for labels in label_reader:
+                    url = labels["url"]
+                    if url in labels_by_url:
+                        raise ValueError(
+                            f"Duplicate URL {url!r} in {label_paths[0].name}"
+                        )
+                    labels_by_url[url] = labels
+
+            with self.open_jsonlines(content_path) as content_reader:
+                for article in content_reader:
+                    url = article["url"]
+                    if url in seen_urls:
+                        raise ValueError(f"Duplicate article URL {url!r}")
+                    seen_urls.add(url)
+                    try:
+                        labels = labels_by_url.pop(url)
+                    except KeyError as error:
+                        raise ValueError(
+                            f"No labels found for URL {url!r} in {content_path.name}"
+                        ) from error
+                    yield article | labels
+
+            if labels_by_url:
+                raise ValueError(
+                    f"Labels without content in {label_paths[0].name}: "
+                    f"{', '.join(sorted(labels_by_url))}"
+                )
+
+    @staticmethod
+    def open_jsonlines(path: Path) -> jsonlines.Reader:
+        if path.suffix == ".gz":
+            return jsonlines.Reader(gzip.open(path, mode="rt"))
+        return jsonlines.Reader(path.open())
+
+    def load_data_unlabelled(self, json_objects: Iterable[dict[str, Any]]) -> Texts:
         """
         Load data for the two special classification classes 'on-topic' and 'quotable',
-        which consider, respecively, any article on urbanism to be positive
+        which consider, respectively, any article on urbanism to be positive
         or any urbanism article that is text-rich
 
-        :param json_reader:
+        :param json_objects:
         :return:
         """
         texts = Texts()
-        for json_object in json_reader:
+        for json_object in json_objects:
             text: str = json_object["content"]
 
             if json_object["off_topic"]:
@@ -250,19 +315,19 @@ class ArticleClassificationTrainer(object):
         return texts
 
     def load_data_labelled(
-        self, objective_label: str, json_reader: jsonlines.Reader
+        self, objective_label: str, json_objects: Iterable[dict[str, Any]]
     ) -> Texts:
         """
         Loads the data from the json_reader creates appropriate training and testing texts
         given the topic/place label being processed
 
         :param objective_label: The label of the topic or the place being processed
-        :param json_reader: A reader for the jsonlines file with input data
+        :param json_objects: Article content merged with its labels
 
         :returns: A Texts object with the texts from the input data
         """
         texts = Texts()
-        for json_object in json_reader:
+        for json_object in json_objects:
             text: str = json_object["content"]
             if json_object["off_topic"]:
                 # Article is not about urbanism
@@ -284,7 +349,7 @@ class ArticleClassificationTrainer(object):
 
     def get_data_spit(self, texts: Texts) -> Dataset:
         """
-        Split the task's training data in to train/valdation/test sets
+        Split the task's training data in to train/validation/test sets
 
         :param texts: is a collection of texts used for training and testing
 

@@ -9,7 +9,7 @@ At Urbanixm we collect information from the Web with relation to urbanism and cu
 it with our AI driven technology.
 Content classification is one of the steps we use to automate our content curation pipeline.
 
-We apply content classification to two levels of content granularities:
+We apply content classification to two levels of content granularity:
 * Articles: are web-pages crawled from the Web
 * Quotes: paragraph-length snippets from the articles
 
@@ -18,12 +18,12 @@ We apply content classification to two levels of content granularities:
 We classify articles along several dimensions:
 
 * On-topic: A boolean classifier which determines whether a given webpage is related to urbanism
-* Quotable: A boolean classifier which detemines whether a given webpage is not only related to urbanism
+* Quotable: A boolean classifier which determines whether a given webpage is not only related to urbanism
 but also that it is a content rich article where we are likely to find quotable information about
 urban interventions, policy and services.
 * Topic X: A series of boolean classifiers which determine whether a given webpage is on a particular
 topic X related to urbanixm, such as, cargo bikes, green roofs or gentrification.
-* Place X: A series of boolean classifiers which determine wheter a given webpage talks about urbanism
+* Place X: A series of boolean classifiers which determine whether a given webpage talks about urbanism
 in the context of a given place, such as, South America, France or Beijing.
 
 We use our propriety data to train our classifiers, but we will shortly add some data to this repository
@@ -93,6 +93,21 @@ uv run pytest -m slow
 ## Model training
 
 ### Articles
+
+Article training data is stored in paired batches under
+`classifiers/training-data/articles`. Each content batch can be plain JSONL or
+gzip-compressed JSONL, while its labels are stored in a correspondingly named
+JSONL file:
+
+```text
+articles_0001.jsonl.gz
+articles_0001_labels.jsonl
+articles_0002.jsonl.gz
+articles_0002_labels.jsonl
+```
+
+Content and label records are matched by their `url` field, so their line order
+does not need to be the same.
 
 ```
 python urbanixm_content_classifier/article_classifier.py --data_dir LOCATON_OF_TRAINING_DATA --objective_type CLASSIFICATION_OBJECTIVE
