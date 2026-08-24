@@ -6,6 +6,8 @@ from urbanixm_content_classifier.article_classifier import (
     ArticleClassificationTrainer,
     ObjectiveType,
     Texts,
+    calculate_classification_metrics,
+    select_decision_threshold,
 )
 
 
@@ -102,3 +104,63 @@ def test_get_data_split_is_reproducible() -> None:
     assert first_dataset.data_train.equals(second_dataset.data_train)
     assert first_dataset.data_validation.equals(second_dataset.data_validation)
     assert first_dataset.data_test.equals(second_dataset.data_test)
+
+
+def test_get_data_split_preserves_class_prevalence() -> None:
+    trainer = ArticleClassificationTrainer()
+    texts = Texts(
+        positive_direct=[f"positive-{index}" for index in range(100)],
+        negative_direct=[f"negative-{index}" for index in range(1000)],
+    )
+
+    dataset = trainer.get_data_spit(texts)
+
+    assert dataset.counts.positive_validation == 10
+    assert dataset.counts.negative_validation == 100
+    assert dataset.counts.positive_test == 10
+    assert dataset.counts.negative_test == 100
+
+
+def test_select_decision_threshold_maximizes_validation_f1() -> None:
+    labels = [1, 1, 0, 0]
+    probabilities = [0.45, 0.40, 0.35, 0.10]
+
+    threshold = select_decision_threshold(labels, probabilities)
+
+    assert threshold == 0.40
+
+
+def test_metrics_expose_all_negative_classifier() -> None:
+    labels = [1] * 10 + [0] * 90
+    probabilities = [0.1] * 100
+
+    metrics = calculate_classification_metrics(labels, probabilities, threshold=0.5)
+
+    assert metrics.accuracy == 0.9
+    assert metrics.balanced_accuracy == 0.5
+    assert metrics.precision == 0.0
+    assert metrics.recall == 0.0
+    assert metrics.f1 == 0.0
+    assert metrics.false_negative == 10
+    assert metrics.true_negative == 90
+
+
+def test_train_model_selects_threshold_and_evaluates_test_set() -> None:
+    trainer = ArticleClassificationTrainer(random_seed=123)
+    texts = Texts(
+        positive_direct=[
+            f"urban cycling policy infrastructure example {index}"
+            for index in range(50)
+        ],
+        negative_direct=[
+            f"celebrity fashion entertainment example {index}" for index in range(50)
+        ],
+    )
+
+    evaluated_model = trainer.train_model(texts)
+
+    assert 0.0 <= evaluated_model.decision_threshold <= 1.0
+    assert evaluated_model.metrics.validation.count == 20
+    assert evaluated_model.metrics.test.count == 20
+    assert evaluated_model.metrics.test.true_positive == 10
+    assert evaluated_model.metrics.test.true_negative == 10

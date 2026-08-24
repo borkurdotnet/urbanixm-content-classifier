@@ -13,11 +13,13 @@ import pandas as pd
 from pandas import DataFrame
 from sklearn.feature_extraction.text import CountVectorizer  # type: ignore
 from sklearn.feature_extraction.text import TfidfTransformer  # type: ignore
+from sklearn.metrics import average_precision_score  # type: ignore
+from sklearn.metrics import precision_recall_curve  # type: ignore
 from sklearn.model_selection import GridSearchCV  # type: ignore
 from sklearn.pipeline import Pipeline  # type: ignore
 from sklearn.svm import SVC  # type: ignore
 from sklearn.utils import shuffle  # type: ignore
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, cast
 
 # Set up logging
 logging.basicConfig(
@@ -105,6 +107,50 @@ class Evaluation:
 
 
 @dataclass
+class ClassificationMetrics:
+    count: int
+    accuracy: float
+    balanced_accuracy: float
+    precision: float
+    recall: float
+    f1: float
+    average_precision: float
+    true_negative: int
+    false_positive: int
+    false_negative: int
+    true_positive: int
+
+    def to_dict(self) -> dict[str, int | float]:
+        return {
+            "count": self.count,
+            "accuracy": self.accuracy,
+            "balanced_accuracy": self.balanced_accuracy,
+            "precision": self.precision,
+            "recall": self.recall,
+            "f1": self.f1,
+            "average_precision": self.average_precision,
+            "true_negative": self.true_negative,
+            "false_positive": self.false_positive,
+            "false_negative": self.false_negative,
+            "true_positive": self.true_positive,
+        }
+
+
+@dataclass
+class ClassificationEvaluation:
+    train: ClassificationMetrics
+    validation: ClassificationMetrics
+    test: ClassificationMetrics
+
+    def to_dict(self) -> dict[str, dict[str, int | float]]:
+        return {
+            "train": self.train.to_dict(),
+            "validation": self.validation.to_dict(),
+            "test": self.test.to_dict(),
+        }
+
+
+@dataclass
 class LabelledEvaluation:
     label: str
     evaluation: Evaluation
@@ -119,13 +165,92 @@ class EvaluatedModel:
     model: Any
     counts: DatasetCounts
     evaluations: list[LabelledEvaluation]
+    decision_threshold: float
+    metrics: ClassificationEvaluation
 
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
         return {
             "counts": self.counts,
             "evaluations": [e.to_dict() for e in self.evaluations],
+            "decision_threshold": self.decision_threshold,
+            "metrics": self.metrics.to_dict(),
         }
+
+
+def select_decision_threshold(
+    labels: Iterable[int], probabilities: Iterable[float]
+) -> float:
+    label_values = list(labels)
+    probability_values = list(probabilities)
+    precision_result, recall_result, threshold_result = cast(
+        tuple[Iterable[float], Iterable[float], Iterable[float]],
+        precision_recall_curve(label_values, probability_values),
+    )
+    precision = list(precision_result)
+    recall = list(recall_result)
+    thresholds = list(threshold_result)
+    if len(thresholds) == 0:
+        return 0.5
+
+    f1_scores = [
+        2 * current_precision * current_recall / (current_precision + current_recall)
+        if current_precision + current_recall > 0
+        else 0.0
+        for current_precision, current_recall in zip(precision[:-1], recall[:-1])
+    ]
+    return float(thresholds[f1_scores.index(max(f1_scores))])
+
+
+def calculate_classification_metrics(
+    labels: Iterable[int], probabilities: Iterable[float], threshold: float
+) -> ClassificationMetrics:
+    label_values = list(labels)
+    probability_values = list(probabilities)
+    predictions = [int(probability >= threshold) for probability in probability_values]
+    true_negative = sum(
+        label == 0 and prediction == 0
+        for label, prediction in zip(label_values, predictions)
+    )
+    false_positive = sum(
+        label == 0 and prediction == 1
+        for label, prediction in zip(label_values, predictions)
+    )
+    false_negative = sum(
+        label == 1 and prediction == 0
+        for label, prediction in zip(label_values, predictions)
+    )
+    true_positive = sum(
+        label == 1 and prediction == 1
+        for label, prediction in zip(label_values, predictions)
+    )
+    positive_count = true_positive + false_negative
+    negative_count = true_negative + false_positive
+    precision = (
+        true_positive / (true_positive + false_positive)
+        if true_positive + false_positive > 0
+        else 0.0
+    )
+    recall = true_positive / positive_count if positive_count > 0 else 0.0
+    specificity = true_negative / negative_count if negative_count > 0 else 0.0
+    f1 = (
+        2 * precision * recall / (precision + recall) if precision + recall > 0 else 0.0
+    )
+    return ClassificationMetrics(
+        count=len(label_values),
+        accuracy=(true_positive + true_negative) / len(label_values),
+        balanced_accuracy=(recall + specificity) / 2,
+        precision=precision,
+        recall=recall,
+        f1=f1,
+        average_precision=float(
+            average_precision_score(label_values, probability_values)  # type: ignore
+        ),
+        true_negative=true_negative,
+        false_positive=false_positive,
+        false_negative=false_negative,
+        true_positive=true_positive,
+    )
 
 
 class ArticleClassificationTrainer(object):
@@ -187,7 +312,7 @@ class ArticleClassificationTrainer(object):
             self.data_dir, "classifiers", "training-data", "articles"
         )
         self.training_metadata_path = os.path.join(
-            self.data_dir, "classifiers", "training-data", "articles_meta.json"
+            self.training_data_dir, "articles_meta.json"
         )
 
         # Set output model path
@@ -441,8 +566,10 @@ class ArticleClassificationTrainer(object):
         neg_train_df: DataFrame = pd.concat(
             [neg_train_df, negi_train_df], ignore_index=True
         )
+        holdout_fraction = pos_holdout_count / positive_count
         neg_holdout_count = min(
-            pos_holdout_count, max((neg_train_df.shape[0] - 1) // 2, 0)
+            round(holdout_fraction * neg_train_df.shape[0]),
+            max((neg_train_df.shape[0] - 1) // 2, 0),
         )
         neg_validation_df = neg_train_df.sample(  # type: ignore
             n=neg_holdout_count, random_state=self.random_seed
@@ -505,7 +632,7 @@ class ArticleClassificationTrainer(object):
             [
                 ("vect", CountVectorizer(stop_words="english")),
                 ("tfidf", TfidfTransformer()),
-                ("clf", SVC(probability=True)),
+                ("clf", SVC(probability=True, random_state=self.random_seed)),
             ]
         )
         gs_clf = GridSearchCV(text_clf, parameters, n_jobs=-1)  # type: ignore
@@ -516,6 +643,35 @@ class ArticleClassificationTrainer(object):
             clf__sample_weight=training_data.data_train["weight"],
         )
 
+        split_probabilities = {
+            "train": self.get_positive_probabilities(gs_clf, training_data.data_train),
+            "validation": self.get_positive_probabilities(
+                gs_clf, training_data.data_validation
+            ),
+            "test": self.get_positive_probabilities(gs_clf, training_data.data_test),
+        }
+        decision_threshold = select_decision_threshold(
+            training_data.data_validation["label"],
+            split_probabilities["validation"],
+        )
+        classification_evaluation = ClassificationEvaluation(
+            train=calculate_classification_metrics(
+                training_data.data_train["label"],
+                split_probabilities["train"],
+                decision_threshold,
+            ),
+            validation=calculate_classification_metrics(
+                training_data.data_validation["label"],
+                split_probabilities["validation"],
+                decision_threshold,
+            ),
+            test=calculate_classification_metrics(
+                training_data.data_test["label"],
+                split_probabilities["test"],
+                decision_threshold,
+            ),
+        )
+
         collected_evaluation: list[LabelledEvaluation] = []
 
         # Overall accuracy
@@ -523,30 +679,15 @@ class ArticleClassificationTrainer(object):
             label="overall",
             evaluation=Evaluation(
                 train=EvaluationResult(
-                    accuracy=float(
-                        gs_clf.score(  # type: ignore
-                            list(training_data.data_train["text"]),
-                            training_data.data_train["label"],
-                        )
-                    ),
+                    accuracy=classification_evaluation.train.accuracy,
                     count=training_data.data_train.shape[0],
                 ),
                 validation=EvaluationResult(
-                    accuracy=float(
-                        gs_clf.score(  # type: ignore
-                            list(training_data.data_validation["text"]),
-                            training_data.data_validation["label"],
-                        )
-                    ),
+                    accuracy=classification_evaluation.validation.accuracy,
                     count=training_data.data_validation.shape[0],
                 ),
                 test=EvaluationResult(
-                    accuracy=float(
-                        gs_clf.score(  # type: ignore
-                            list(training_data.data_test["text"]),
-                            training_data.data_test["label"],
-                        )
-                    ),
+                    accuracy=classification_evaluation.test.accuracy,
                     count=training_data.data_test.shape[0],
                 ),
             ),
@@ -574,33 +715,24 @@ class ArticleClassificationTrainer(object):
                         label=f"{sign}_{direction}",
                         evaluation=Evaluation(
                             train=EvaluationResult(
-                                accuracy=float(
-                                    gs_clf.score(  # type: ignore
-                                        list(train_sub["text"]),
-                                        train_sub["label"],
-                                    )
+                                accuracy=self.score_at_threshold(
+                                    gs_clf, train_sub, decision_threshold
                                 )
                                 if train_sub.shape[0] > 0
                                 else 0.0,
                                 count=train_sub.shape[0],
                             ),
                             validation=EvaluationResult(
-                                accuracy=float(
-                                    gs_clf.score(  # type: ignore
-                                        list(validation_sub["text"]),
-                                        validation_sub["label"],
-                                    )
+                                accuracy=self.score_at_threshold(
+                                    gs_clf, validation_sub, decision_threshold
                                 )
                                 if validation_sub.shape[0] > 0
                                 else 0.0,
                                 count=validation_sub.shape[0],
                             ),
                             test=EvaluationResult(
-                                accuracy=float(
-                                    gs_clf.score(  # type: ignore
-                                        list(test_sub["text"]),
-                                        test_sub["label"],
-                                    )
+                                accuracy=self.score_at_threshold(
+                                    gs_clf, test_sub, decision_threshold
                                 )
                                 if test_sub.shape[0] > 0
                                 else 0.0,
@@ -614,7 +746,27 @@ class ArticleClassificationTrainer(object):
             model=gs_clf,
             counts=training_data.counts,
             evaluations=collected_evaluation,
+            decision_threshold=decision_threshold,
+            metrics=classification_evaluation,
         )
+
+    @staticmethod
+    def get_positive_probabilities(model: Any, data: DataFrame) -> list[float]:
+        positive_index = list(model.classes_).index(1)
+        probabilities = model.predict_proba(list(data["text"]))[:, positive_index]
+        return [float(probability) for probability in probabilities]
+
+    def score_at_threshold(
+        self, model: Any, data: DataFrame, decision_threshold: float
+    ) -> float:
+        probabilities = self.get_positive_probabilities(model, data)
+        predictions = [
+            int(probability >= decision_threshold) for probability in probabilities
+        ]
+        correct_count = sum(
+            label == prediction for label, prediction in zip(data["label"], predictions)
+        )
+        return correct_count / len(predictions)
 
     def save_classifier_model(
         self, objective_label: str | None, evaluated_model: EvaluatedModel
@@ -631,8 +783,10 @@ class ArticleClassificationTrainer(object):
             "objective_type": self.objective_type.value,
             "objective_label": objective_label,
             "random_seed": self.random_seed,
+            "decision_threshold": evaluated_model.decision_threshold,
             "counts": evaluated_model.counts.to_dict(),
             "evaluations": [e.to_dict() for e in evaluated_model.evaluations],
+            "metrics": evaluated_model.metrics.to_dict(),
         }
         model_meta_filename = self.objective_type.value
         if objective_label is not None:

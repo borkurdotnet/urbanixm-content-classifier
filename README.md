@@ -105,12 +105,30 @@ articles_0002_labels.jsonl
 Content and label records are matched by their `url` field, so their line order
 does not need to be the same.
 
+Article datasets are split reproducibly while preserving the observed positive
+and negative class proportions in the training, validation and test sets. The
+validation set selects the probability threshold that maximizes positive-class
+F1. That threshold is then fixed for test evaluation and saved with the model
+metadata for use during inference.
+
+The article evaluation report includes precision, recall, F1, balanced
+accuracy, average precision and confusion-matrix counts in addition to raw
+accuracy. These metrics make a majority-class classifier visible: predicting
+every page as negative produces zero positive recall and F1, regardless of its
+raw accuracy.
+
 ```
-python urbanixm_content_classifier/article_classifier.py --data_dir LOCATON_OF_TRAINING_DATA --objective_type CLASSIFICATION_OBJECTIVE
+python urbanixm_content_classifier/article_classifier.py --data_dir ROOT_OF_PROJECT_DATA --objective_type CLASSIFICATION_OBJECTIVE
 ```
 
 ### Quotes
 
 ```
-python urbanixm_content_classifier/quote_classifier.py --data_dir LOCATON_OF_TRAINING_DATA --objective_type CLASSIFICATION_OBJECTIVE
+python urbanixm_content_classifier/quote_classifier.py --data_dir ROOT_OF_PROJECT_DATA --objective_type CLASSIFICATION_OBJECTIVE
+```
+
+### Evaluation Summary
+
+```
+uv run python urbanixm_content_classifier/evaluation_summary.py --data_dir ROOT_OF_PROJECT_DATA
 ```

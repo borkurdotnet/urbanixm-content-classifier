@@ -70,6 +70,33 @@ class EvaluationSummarizer(object):
                 evaluation_report = json.load(fp)
                 fp.close()
 
+            if "metrics" in evaluation_report:
+                test_metrics = evaluation_report["metrics"]["test"]
+                self.report_file.write(
+                    f"Decision threshold selected on validation F1: "
+                    f"{evaluation_report['decision_threshold']:.3f}\n\n"
+                )
+                summary = pd.DataFrame(
+                    [
+                        {
+                            "count": test_metrics["count"],
+                            "accuracy": test_metrics["accuracy"],
+                            "balanced accuracy": test_metrics["balanced_accuracy"],
+                            "precision": test_metrics["precision"],
+                            "recall": test_metrics["recall"],
+                            "f1": test_metrics["f1"],
+                            "average precision": test_metrics["average_precision"],
+                            "TN": test_metrics["true_negative"],
+                            "FP": test_metrics["false_positive"],
+                            "FN": test_metrics["false_negative"],
+                            "TP": test_metrics["true_positive"],
+                        }
+                    ]
+                )
+                self.report_file.write(summary.to_markdown(index=False, floatfmt=".2f"))
+                self.report_file.write("\n\n")
+                return
+
             for evaluation in evaluation_report["evaluations"]:
                 if evaluation["label"] == "overall":
                     self.report_file.write(
@@ -121,6 +148,21 @@ class EvaluationSummarizer(object):
                     model_evaluation["# neg. test"] = evaluation_report["counts"][
                         "negative_test"
                     ]
+
+                    if "metrics" in evaluation_report:
+                        test_metrics = evaluation_report["metrics"]["test"]
+                        model_evaluation["threshold"] = evaluation_report[
+                            "decision_threshold"
+                        ]
+                        model_evaluation["precision"] = test_metrics["precision"]
+                        model_evaluation["recall"] = test_metrics["recall"]
+                        model_evaluation["f1"] = test_metrics["f1"]
+                        model_evaluation["balanced acc."] = test_metrics[
+                            "balanced_accuracy"
+                        ]
+                        model_evaluation["avg. precision"] = test_metrics[
+                            "average_precision"
+                        ]
 
                     acc_pos_train = 0.0
                     acc_neg_train = 0.0
