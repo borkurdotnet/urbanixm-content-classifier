@@ -621,13 +621,16 @@ class ArticleClassificationTrainer(object):
 
         # Reserve roughly 10% of positive cases for each holdout set.
         positive_count = len(texts.positive_direct) + len(texts.positive_indirect)
+        negative_count = len(texts.negative_direct) + len(texts.negative_indirect)
+        if positive_count == 0 or negative_count == 0:
+            raise ValueError(
+                "Article classification requires both positive and negative examples"
+            )
         pos_holdout_count = min(
             max(POSITIVE_TEST_COUNT_MIN, int(0.1 * positive_count)),
             max((positive_count - 1) // 2, 0),
         )
-        pos_neg_ratio = positive_count / (
-            len(texts.negative_direct) + len(texts.negative_indirect)
-        )
+        pos_neg_ratio = positive_count / negative_count
 
         # Positive direct samples
         pos_train_df = pd.DataFrame(data=texts.positive_direct, columns=["text"])

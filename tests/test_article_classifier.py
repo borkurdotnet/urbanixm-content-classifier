@@ -1,6 +1,11 @@
 import gzip
 import json
+import pickle
 from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pytest
 
 from urbanixm_content_classifier.article_classifier import (
     ArticleClassificationTrainer,
@@ -57,6 +62,121 @@ def test_load_data_joins_labels_by_url_across_batches(tmp_path: Path) -> None:
 
     assert texts.positive_direct == ["first", "third"]
     assert texts.negative_direct == ["second", "fourth"]
+
+
+def test_iter_training_records_rejects_duplicate_article_urls(tmp_path: Path) -> None:
+    write_jsonlines(
+        tmp_path / "articles_0001.jsonl",
+        [
+            {"url": "https://example.com/duplicate", "content": "first"},
+            {"url": "https://example.com/duplicate", "content": "second"},
+        ],
+    )
+    write_jsonlines(
+        tmp_path / "articles_0001_labels.jsonl",
+        [{"url": "https://example.com/duplicate", "off_topic": False}],
+    )
+    trainer = ArticleClassificationTrainer()
+    trainer.training_data_dir = str(tmp_path)
+
+    with pytest.raises(ValueError, match="Duplicate article URL"):
+        list(trainer.iter_training_records())
+
+
+def test_iter_training_records_rejects_missing_and_orphan_labels(
+    tmp_path: Path,
+) -> None:
+    missing_dir = tmp_path / "missing"
+    missing_dir.mkdir()
+    write_jsonlines(
+        missing_dir / "articles_0001.jsonl",
+        [{"url": "https://example.com/article", "content": "article"}],
+    )
+    write_jsonlines(missing_dir / "articles_0001_labels.jsonl", [])
+    trainer = ArticleClassificationTrainer()
+    trainer.training_data_dir = str(missing_dir)
+
+    with pytest.raises(ValueError, match="No labels found"):
+        list(trainer.iter_training_records())
+
+    orphan_dir = tmp_path / "orphan"
+    orphan_dir.mkdir()
+    write_jsonlines(
+        orphan_dir / "articles_0001.jsonl",
+        [{"url": "https://example.com/article", "content": "article"}],
+    )
+    write_jsonlines(
+        orphan_dir / "articles_0001_labels.jsonl",
+        [
+            {"url": "https://example.com/article", "off_topic": False},
+            {"url": "https://example.com/orphan", "off_topic": False},
+        ],
+    )
+    trainer.training_data_dir = str(orphan_dir)
+
+    with pytest.raises(ValueError, match="Labels without content"):
+        list(trainer.iter_training_records())
+
+
+def test_label_sources_determine_classes_and_sample_weights() -> None:
+    trainer = ArticleClassificationTrainer()
+    trainer.objective_type = ObjectiveType.TOPICS
+    records: list[dict[str, Any]] = [
+        {
+            "content": "direct",
+            "off_topic": False,
+            "topics": {"direct": ["target"], "derived": []},
+        },
+        {
+            "content": "derived",
+            "off_topic": False,
+            "topics": {"direct": [], "derived": ["target"]},
+        },
+        {
+            "content": "other topic",
+            "off_topic": False,
+            "topics": {"direct": ["other"], "derived": []},
+        },
+        {
+            "content": "off topic",
+            "off_topic": True,
+            "topics": {"direct": [], "derived": []},
+        },
+    ]
+
+    texts = trainer.load_data_labelled("target", records)
+
+    assert texts.positive_direct == ["direct"]
+    assert texts.positive_indirect == ["derived"]
+    assert texts.negative_indirect == ["other topic"]
+    assert texts.negative_direct == ["off topic"]
+
+    weighted_texts = Texts(
+        positive_direct=[f"positive-direct-{index}" for index in range(20)],
+        positive_indirect=[f"positive-indirect-{index}" for index in range(20)],
+        negative_direct=[f"negative-direct-{index}" for index in range(20)],
+        negative_indirect=[f"negative-indirect-{index}" for index in range(20)],
+    )
+    dataset = trainer.get_data_spit(weighted_texts)
+    all_data = pd.concat(
+        [dataset.data_train, dataset.data_validation, dataset.data_test]
+    )
+
+    assert set(all_data.loc[all_data["d/i"] == "direct", "weight"]) == {1.0}
+    assert set(
+        all_data.loc[
+            (all_data["p/n"] == "positive") & (all_data["d/i"] == "indirect"),
+            "weight",
+        ]
+    ) == {0.75}
+    assert set(all_data.loc[all_data["p/n"] == "negative", "weight"]) == {1.0}
+
+
+def test_data_split_rejects_single_class_dataset() -> None:
+    trainer = ArticleClassificationTrainer()
+
+    with pytest.raises(ValueError, match="positive and negative"):
+        trainer.get_data_spit(Texts(positive_direct=["positive"] * 20))
 
 
 def test_get_data_split_includes_validation_set() -> None:
@@ -205,6 +325,45 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     assert metadata["runtime"]["uv_lock_sha256"].startswith("sha256:")
 
 
+def test_saved_model_round_trip_preserves_probabilities_and_threshold(
+    tmp_path: Path,
+) -> None:
+    trainer = ArticleClassificationTrainer(random_seed=123)
+    trainer.output_model_path = str(tmp_path)
+    trainer.training_data_dir = str(tmp_path / "training")
+    trainer.objective_type = ObjectiveType.ON_TOPIC
+    training_data_dir = Path(trainer.training_data_dir)
+    training_data_dir.mkdir()
+    (training_data_dir / "articles_0001.jsonl").write_text("article\n")
+    texts = Texts(
+        positive_direct=[f"urban cycling policy {index}" for index in range(50)],
+        negative_direct=[f"celebrity fashion news {index}" for index in range(50)],
+    )
+    evaluated_model = trainer.train_model(texts)
+    trainer.save_classifier_model(None, evaluated_model)
+    sample_texts = ["urban cycling infrastructure", "celebrity fashion"]
+    expected_probabilities = evaluated_model.model.predict_proba(sample_texts)
+    positive_index = list(evaluated_model.model.classes_).index(1)
+    expected_predictions = [
+        int(probability >= evaluated_model.decision_threshold)
+        for probability in expected_probabilities[:, positive_index]
+    ]
+
+    with (tmp_path / "on_topic" / "on_topic.pickle").open("rb") as model_file:
+        loaded_model = pickle.load(model_file)
+    metadata = json.loads((tmp_path / "on_topic" / "on_topic.json").read_text())
+    loaded_probabilities = loaded_model.predict_proba(sample_texts)
+    loaded_positive_index = list(loaded_model.classes_).index(1)
+    predictions = [
+        int(probability >= metadata["decision_threshold"])
+        for probability in loaded_probabilities[:, loaded_positive_index]
+    ]
+
+    assert loaded_probabilities.tolist() == expected_probabilities.tolist()
+    assert metadata["decision_threshold"] == evaluated_model.decision_threshold
+    assert predictions == expected_predictions
+
+
 def test_training_data_fingerprint_is_deterministic_and_content_sensitive(
     tmp_path: Path,
 ) -> None:
@@ -250,3 +409,44 @@ def test_clear_objective_models_only_removes_selected_objective(
 
     assert not topics_dir.exists()
     assert (places_dir / "current.json").exists()
+
+
+def test_train_models_writes_only_eligible_current_objective_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trainer = ArticleClassificationTrainer()
+    trainer.objective_type = ObjectiveType.TOPICS
+    trainer.output_model_path = str(tmp_path / "models")
+    trainer.training_metadata_path = str(tmp_path / "articles_meta.json")
+    Path(trainer.training_metadata_path).write_text(
+        json.dumps(
+            {
+                "topics": {
+                    "eligible": {"direct": 30, "derived": 0},
+                    "insufficient": {"direct": 29, "derived": 0},
+                }
+            }
+        )
+    )
+    objective_dir = Path(trainer.output_model_path) / "topics"
+    objective_dir.mkdir(parents=True)
+    (objective_dir / "obsolete.json").write_text("{}")
+
+    def load_data(objective_label: str | None) -> Texts:
+        return Texts()
+
+    def train_model(_texts: Texts) -> Any:
+        return object()
+
+    monkeypatch.setattr(trainer, "load_data", load_data)
+    monkeypatch.setattr(trainer, "train_model", train_model)
+
+    def save_artifact(objective_label: str | None, evaluated_model: Any) -> None:
+        objective_dir.mkdir(parents=True, exist_ok=True)
+        (objective_dir / f"{objective_label}.json").write_text("{}")
+
+    monkeypatch.setattr(trainer, "save_classifier_model", save_artifact)
+
+    trainer.train_models()
+
+    assert sorted(path.name for path in objective_dir.iterdir()) == ["eligible.json"]
