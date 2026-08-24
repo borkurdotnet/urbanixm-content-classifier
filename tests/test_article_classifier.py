@@ -171,6 +171,8 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     assert evaluated_model.selection_metric == "average_precision"
     assert evaluated_model.cv_folds == 5
     assert evaluated_model.cv_average_precision == 1.0
+    assert evaluated_model.n_jobs == 1
+    assert evaluated_model.model.n_jobs == 1
     assert set(evaluated_model.best_parameters) == {
         "clf__C",
         "vect__min_df",
@@ -184,6 +186,7 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     assert metadata["cv_average_precision"] == 1.0
     assert metadata["cv_folds"] == 5
     assert metadata["selection_metric"] == "average_precision"
+    assert metadata["n_jobs"] == 1
 
 
 def test_clear_objective_models_only_removes_selected_objective(

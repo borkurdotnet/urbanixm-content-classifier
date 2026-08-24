@@ -173,6 +173,7 @@ class EvaluatedModel:
     cv_average_precision: float
     cv_folds: int
     selection_metric: str
+    n_jobs: int
 
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
@@ -185,6 +186,7 @@ class EvaluatedModel:
             "cv_average_precision": self.cv_average_precision,
             "cv_folds": self.cv_folds,
             "selection_metric": self.selection_metric,
+            "n_jobs": self.n_jobs,
         }
 
 
@@ -270,9 +272,13 @@ class ArticleClassificationTrainer(object):
     training_metadata_path: str
     output_model_path: str
     random_seed: int
+    n_jobs: int
 
-    def __init__(self, random_seed: int = DEFAULT_RANDOM_SEED) -> None:
+    def __init__(self, random_seed: int = DEFAULT_RANDOM_SEED, n_jobs: int = 1) -> None:
+        if n_jobs == 0:
+            raise ValueError("n_jobs cannot be zero")
         self.random_seed = random_seed
+        self.n_jobs = n_jobs
 
     def parse_arguments_training(self) -> None:
         """
@@ -299,9 +305,18 @@ class ArticleClassificationTrainer(object):
             default=DEFAULT_RANDOM_SEED,
             help=f"Seed used for train/validation/test splitting (default: {DEFAULT_RANDOM_SEED})",
         )
+        parser.add_argument(
+            "--n_jobs",
+            type=int,
+            default=1,
+            help="Parallel cross-validation workers; use -1 for all CPUs (default: 1)",
+        )
         args = parser.parse_args()
 
+        if args.n_jobs == 0:
+            parser.error("--n_jobs cannot be zero")
         self.random_seed = args.random_seed
+        self.n_jobs = args.n_jobs
 
         # Initialize data directory
         self.data_dir = args.data_dir
@@ -674,7 +689,8 @@ class ArticleClassificationTrainer(object):
             parameters,
             scoring="average_precision",
             cv=cross_validation,
-            n_jobs=-1,
+            n_jobs=self.n_jobs,
+            pre_dispatch="n_jobs",
             refit=True,
         )
 
@@ -798,6 +814,7 @@ class ArticleClassificationTrainer(object):
             cv_average_precision=float(gs_clf.best_score_),  # type: ignore
             cv_folds=cv_folds,
             selection_metric="average_precision",
+            n_jobs=self.n_jobs,
         )
 
     @staticmethod
@@ -838,6 +855,7 @@ class ArticleClassificationTrainer(object):
             "cv_average_precision": evaluated_model.cv_average_precision,
             "cv_folds": evaluated_model.cv_folds,
             "selection_metric": evaluated_model.selection_metric,
+            "n_jobs": evaluated_model.n_jobs,
             "counts": evaluated_model.counts.to_dict(),
             "evaluations": [e.to_dict() for e in evaluated_model.evaluations],
             "metrics": evaluated_model.metrics.to_dict(),

@@ -128,6 +128,12 @@ raw accuracy.
 python urbanixm_content_classifier/article_classifier.py --data_dir ROOT_OF_PROJECT_DATA --objective_type CLASSIFICATION_OBJECTIVE
 ```
 
+Cross-validation uses one worker by default because each worker builds its own
+text feature matrices and probability-enabled SVM fits can consume substantial
+memory. Use `--n_jobs 2` or `--n_jobs 4` to opt into bounded parallelism when
+the machine has sufficient memory. `--n_jobs -1` uses every CPU, but can cause
+joblib workers to be terminated under memory pressure on larger article sets.
+
 ### Quotes
 
 ```
