@@ -10,12 +10,14 @@ import logging
 import os
 from pathlib import Path
 import pandas as pd
+import shutil
 from pandas import DataFrame
 from sklearn.feature_extraction.text import CountVectorizer  # type: ignore
 from sklearn.feature_extraction.text import TfidfTransformer  # type: ignore
 from sklearn.metrics import average_precision_score  # type: ignore
 from sklearn.metrics import precision_recall_curve  # type: ignore
 from sklearn.model_selection import GridSearchCV  # type: ignore
+from sklearn.model_selection import StratifiedKFold  # type: ignore
 from sklearn.pipeline import Pipeline  # type: ignore
 from sklearn.svm import SVC  # type: ignore
 from sklearn.utils import shuffle  # type: ignore
@@ -167,6 +169,10 @@ class EvaluatedModel:
     evaluations: list[LabelledEvaluation]
     decision_threshold: float
     metrics: ClassificationEvaluation
+    best_parameters: dict[str, Any]
+    cv_average_precision: float
+    cv_folds: int
+    selection_metric: str
 
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
@@ -175,6 +181,10 @@ class EvaluatedModel:
             "evaluations": [e.to_dict() for e in self.evaluations],
             "decision_threshold": self.decision_threshold,
             "metrics": self.metrics.to_dict(),
+            "best_parameters": self.best_parameters,
+            "cv_average_precision": self.cv_average_precision,
+            "cv_folds": self.cv_folds,
+            "selection_metric": self.selection_metric,
         }
 
 
@@ -624,18 +634,49 @@ class ArticleClassificationTrainer(object):
         training_data = self.get_data_spit(texts)
 
         parameters: dict[str, Any] = {
-            "vect__ngram_range": [(1, 1)],
-            "tfidf__use_idf": [True],
+            "vect__ngram_range": [(1, 1), (1, 2)],
+            "vect__min_df": [1, 3],
+            "clf__C": [0.1, 1.0, 10.0],
         }
+
+        cv_folds = min(
+            5,
+            training_data.counts.positive_train,
+            training_data.counts.negative_train,
+        )
+        if cv_folds < 3:
+            raise ValueError(
+                "At least three training examples per class are required for "
+                "hyperparameter selection"
+            )
+        cross_validation = StratifiedKFold(
+            n_splits=cv_folds,
+            shuffle=True,
+            random_state=self.random_seed,
+        )
 
         text_clf = Pipeline(
             [
                 ("vect", CountVectorizer(stop_words="english")),
                 ("tfidf", TfidfTransformer()),
-                ("clf", SVC(probability=True, random_state=self.random_seed)),
+                (
+                    "clf",
+                    SVC(
+                        kernel="linear",
+                        probability=True,
+                        random_state=self.random_seed,
+                    ),
+                ),
             ]
         )
-        gs_clf = GridSearchCV(text_clf, parameters, n_jobs=-1)  # type: ignore
+        gs_clf = GridSearchCV(  # type: ignore
+            text_clf,
+            parameters,
+            scoring="average_precision",
+            cv=cross_validation,
+            n_jobs=-1,
+            refit=True,
+        )
 
         gs_clf = gs_clf.fit(  # type: ignore
             list(training_data.data_train["text"]),
@@ -748,6 +789,15 @@ class ArticleClassificationTrainer(object):
             evaluations=collected_evaluation,
             decision_threshold=decision_threshold,
             metrics=classification_evaluation,
+            best_parameters={
+                parameter: list(cast(tuple[object, ...], value))
+                if isinstance(value, tuple)
+                else value
+                for parameter, value in gs_clf.best_params_.items()  # type: ignore
+            },
+            cv_average_precision=float(gs_clf.best_score_),  # type: ignore
+            cv_folds=cv_folds,
+            selection_metric="average_precision",
         )
 
     @staticmethod
@@ -784,6 +834,10 @@ class ArticleClassificationTrainer(object):
             "objective_label": objective_label,
             "random_seed": self.random_seed,
             "decision_threshold": evaluated_model.decision_threshold,
+            "best_parameters": evaluated_model.best_parameters,
+            "cv_average_precision": evaluated_model.cv_average_precision,
+            "cv_folds": evaluated_model.cv_folds,
+            "selection_metric": evaluated_model.selection_metric,
             "counts": evaluated_model.counts.to_dict(),
             "evaluations": [e.to_dict() for e in evaluated_model.evaluations],
             "metrics": evaluated_model.metrics.to_dict(),
@@ -808,10 +862,20 @@ class ArticleClassificationTrainer(object):
             pickle.dump(evaluated_model.model, fh)
             fh.close()
 
+    def clear_objective_models(self) -> None:
+        objective_model_path = os.path.join(
+            self.output_model_path, self.objective_type.value
+        )
+        if os.path.isdir(objective_model_path):
+            logging.info("Removing stale models from %s", objective_model_path)
+            shutil.rmtree(objective_model_path)
+
     def train_models(self) -> None:
         """
         Trains the appropriate models using information passed on the command line
         """
+
+        self.clear_objective_models()
 
         # Global models
         if (

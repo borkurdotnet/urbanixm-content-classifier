@@ -145,8 +145,12 @@ def test_metrics_expose_all_negative_classifier() -> None:
     assert metrics.true_negative == 90
 
 
-def test_train_model_selects_threshold_and_evaluates_test_set() -> None:
+def test_train_model_selects_threshold_and_evaluates_test_set(
+    tmp_path: Path,
+) -> None:
     trainer = ArticleClassificationTrainer(random_seed=123)
+    trainer.output_model_path = str(tmp_path)
+    trainer.objective_type = ObjectiveType.ON_TOPIC
     texts = Texts(
         positive_direct=[
             f"urban cycling policy infrastructure example {index}"
@@ -164,3 +168,38 @@ def test_train_model_selects_threshold_and_evaluates_test_set() -> None:
     assert evaluated_model.metrics.test.count == 20
     assert evaluated_model.metrics.test.true_positive == 10
     assert evaluated_model.metrics.test.true_negative == 10
+    assert evaluated_model.selection_metric == "average_precision"
+    assert evaluated_model.cv_folds == 5
+    assert evaluated_model.cv_average_precision == 1.0
+    assert set(evaluated_model.best_parameters) == {
+        "clf__C",
+        "vect__min_df",
+        "vect__ngram_range",
+    }
+
+    trainer.save_classifier_model(objective_label=None, evaluated_model=evaluated_model)
+    metadata = json.loads((tmp_path / "on_topic" / "on_topic.json").read_text())
+
+    assert metadata["best_parameters"] == evaluated_model.best_parameters
+    assert metadata["cv_average_precision"] == 1.0
+    assert metadata["cv_folds"] == 5
+    assert metadata["selection_metric"] == "average_precision"
+
+
+def test_clear_objective_models_only_removes_selected_objective(
+    tmp_path: Path,
+) -> None:
+    trainer = ArticleClassificationTrainer()
+    trainer.output_model_path = str(tmp_path)
+    trainer.objective_type = ObjectiveType.TOPICS
+    topics_dir = tmp_path / "topics"
+    places_dir = tmp_path / "places"
+    topics_dir.mkdir()
+    places_dir.mkdir()
+    (topics_dir / "obsolete.json").write_text("{}")
+    (places_dir / "current.json").write_text("{}")
+
+    trainer.clear_objective_models()
+
+    assert not topics_dir.exists()
+    assert (places_dir / "current.json").exists()

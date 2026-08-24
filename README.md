@@ -107,9 +107,16 @@ does not need to be the same.
 
 Article datasets are split reproducibly while preserving the observed positive
 and negative class proportions in the training, validation and test sets. The
-validation set selects the probability threshold that maximizes positive-class
-F1. That threshold is then fixed for test evaluation and saved with the model
-metadata for use during inference.
+training set uses seeded stratified cross-validation to select a linear SVM by
+average precision across regularization strength, unigram/bigram features and
+minimum document frequency. The validation set then selects the probability
+threshold that maximizes positive-class F1. That threshold is fixed for test
+evaluation and saved with the selected parameters and cross-validation score in
+the model metadata for use during inference.
+
+Before training, existing models for the selected objective are removed so a
+new report cannot silently include stale models that no longer meet the minimum
+training-data requirement. Models for other objectives are left untouched.
 
 The article evaluation report includes precision, recall, F1, balanced
 accuracy, average precision and confusion-matrix counts in addition to raw
