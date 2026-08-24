@@ -124,6 +124,15 @@ accuracy. These metrics make a majority-class classifier visible: predicting
 every page as negative produces zero positive recall and F1, regardless of its
 raw accuracy.
 
+Each article model metadata file includes a schema version and UTC creation
+time, a SHA-256 manifest and combined fingerprint for the training files, the
+Git commit and dirty-worktree state, Python and core library versions, and a
+SHA-256 fingerprint of `uv.lock`. Training-data paths are relative, so
+provenance does not expose machine-specific directories. A model created with
+`git_dirty: true` may include code or repository files not represented by its
+recorded commit and should not be treated as exactly reproducible from that
+commit alone.
+
 ```
 python urbanixm_content_classifier/article_classifier.py --data_dir ROOT_OF_PROJECT_DATA --objective_type CLASSIFICATION_OBJECTIVE
 ```

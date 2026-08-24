@@ -1,16 +1,20 @@
 import argparse
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import gzip
+import hashlib
+from importlib.metadata import version
 import json
 import pickle
 import jsonlines
 import logging
 import os
+import platform
 from pathlib import Path
 import pandas as pd
 import shutil
+import subprocess
 from pandas import DataFrame
 from sklearn.feature_extraction.text import CountVectorizer  # type: ignore
 from sklearn.feature_extraction.text import TfidfTransformer  # type: ignore
@@ -30,6 +34,8 @@ logging.basicConfig(
 
 POSITIVE_TEST_COUNT_MIN = 10
 DEFAULT_RANDOM_SEED = 42
+METADATA_SCHEMA_VERSION = 1
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ObjectiveType(Enum):
@@ -265,6 +271,87 @@ def calculate_classification_metrics(
     )
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as input_file:
+        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_training_data_provenance(training_data_dir: Path) -> dict[str, Any]:
+    paths = sorted(
+        {
+            *training_data_dir.glob("articles_*.jsonl"),
+            *training_data_dir.glob("articles_*.jsonl.gz"),
+            *training_data_dir.glob("articles_meta.json"),
+        }
+    )
+    if not paths:
+        raise FileNotFoundError(
+            f"No article training data found in {training_data_dir}"
+        )
+
+    combined_digest = hashlib.sha256()
+    files: list[dict[str, str | int]] = []
+    for path in paths:
+        relative_path = path.relative_to(training_data_dir).as_posix()
+        file_digest = sha256_file(path)
+        size_bytes = path.stat().st_size
+        combined_digest.update(relative_path.encode("utf-8"))
+        combined_digest.update(b"\0")
+        combined_digest.update(file_digest.encode("ascii"))
+        combined_digest.update(b"\0")
+        files.append(
+            {
+                "path": relative_path,
+                "sha256": file_digest,
+                "size_bytes": size_bytes,
+            }
+        )
+
+    return {
+        "fingerprint": f"sha256:{combined_digest.hexdigest()}",
+        "files": files,
+    }
+
+
+def run_git_command(*arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def build_code_provenance() -> dict[str, str | bool]:
+    try:
+        git_commit = run_git_command("rev-parse", "HEAD")
+        git_dirty = bool(run_git_command("status", "--porcelain"))
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        git_commit = "unknown"
+        git_dirty = True
+    return {"git_commit": git_commit, "git_dirty": git_dirty}
+
+
+def build_runtime_provenance() -> dict[str, str]:
+    lockfile_path = REPOSITORY_ROOT / "uv.lock"
+    return {
+        "python": platform.python_version(),
+        "scikit_learn": version("scikit-learn"),
+        "pandas": version("pandas"),
+        "joblib": version("joblib"),
+        "uv_lock_sha256": (
+            f"sha256:{sha256_file(lockfile_path)}"
+            if lockfile_path.exists()
+            else "unavailable"
+        ),
+    }
+
+
 class ArticleClassificationTrainer(object):
     data_dir: str
     objective_type: ObjectiveType
@@ -273,12 +360,14 @@ class ArticleClassificationTrainer(object):
     output_model_path: str
     random_seed: int
     n_jobs: int
+    provenance: dict[str, Any] | None
 
     def __init__(self, random_seed: int = DEFAULT_RANDOM_SEED, n_jobs: int = 1) -> None:
         if n_jobs == 0:
             raise ValueError("n_jobs cannot be zero")
         self.random_seed = random_seed
         self.n_jobs = n_jobs
+        self.provenance = None
 
     def parse_arguments_training(self) -> None:
         """
@@ -844,11 +933,24 @@ class ArticleClassificationTrainer(object):
         :param evaluated_model: An object containing both the model and the meta-data
         """
 
+        if self.provenance is None:
+            self.provenance = {
+                "training_data": build_training_data_provenance(
+                    Path(self.training_data_dir)
+                ),
+                "code": build_code_provenance(),
+                "runtime": build_runtime_provenance(),
+            }
+
         # Save classifier meta-data
         metadata: dict[str, Any] = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "metadata_schema_version": METADATA_SCHEMA_VERSION,
+            "created_at": datetime.now(timezone.utc)
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z"),
             "objective_type": self.objective_type.value,
             "objective_label": objective_label,
+            **self.provenance,
             "random_seed": self.random_seed,
             "decision_threshold": evaluated_model.decision_threshold,
             "best_parameters": evaluated_model.best_parameters,

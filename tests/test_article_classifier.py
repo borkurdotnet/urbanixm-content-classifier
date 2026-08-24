@@ -6,6 +6,7 @@ from urbanixm_content_classifier.article_classifier import (
     ArticleClassificationTrainer,
     ObjectiveType,
     Texts,
+    build_training_data_provenance,
     calculate_classification_metrics,
     select_decision_threshold,
 )
@@ -150,7 +151,14 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
 ) -> None:
     trainer = ArticleClassificationTrainer(random_seed=123)
     trainer.output_model_path = str(tmp_path)
+    trainer.training_data_dir = str(tmp_path / "training")
     trainer.objective_type = ObjectiveType.ON_TOPIC
+    training_data_dir = Path(trainer.training_data_dir)
+    training_data_dir.mkdir()
+    (training_data_dir / "articles_0001.jsonl").write_text('{"content": "one"}\n')
+    (training_data_dir / "articles_0001_labels.jsonl").write_text(
+        '{"off_topic": false}\n'
+    )
     texts = Texts(
         positive_direct=[
             f"urban cycling policy infrastructure example {index}"
@@ -187,6 +195,42 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     assert metadata["cv_folds"] == 5
     assert metadata["selection_metric"] == "average_precision"
     assert metadata["n_jobs"] == 1
+    assert metadata["metadata_schema_version"] == 1
+    assert metadata["created_at"].endswith("Z")
+    assert metadata["training_data"]["fingerprint"].startswith("sha256:")
+    assert metadata["code"]["git_commit"]
+    assert isinstance(metadata["code"]["git_dirty"], bool)
+    assert metadata["runtime"]["python"]
+    assert metadata["runtime"]["scikit_learn"]
+    assert metadata["runtime"]["uv_lock_sha256"].startswith("sha256:")
+
+
+def test_training_data_fingerprint_is_deterministic_and_content_sensitive(
+    tmp_path: Path,
+) -> None:
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    for directory in (first_dir, second_dir):
+        (directory / "articles_0001.jsonl").write_text("article\n")
+        (directory / "articles_0001_labels.jsonl").write_text("labels\n")
+
+    first = build_training_data_provenance(first_dir)
+    second = build_training_data_provenance(second_dir)
+
+    assert first == second
+    assert [file["path"] for file in first["files"]] == [
+        "articles_0001.jsonl",
+        "articles_0001_labels.jsonl",
+    ]
+
+    (second_dir / "articles_0001_labels.jsonl").write_text("changed labels\n")
+
+    assert (
+        build_training_data_provenance(second_dir)["fingerprint"]
+        != first["fingerprint"]
+    )
 
 
 def test_clear_objective_models_only_removes_selected_objective(
