@@ -25,6 +25,7 @@ logging.basicConfig(
 )
 
 POSITIVE_TEST_COUNT_MIN = 10
+DEFAULT_RANDOM_SEED = 42
 
 
 class ObjectiveType(Enum):
@@ -133,9 +134,10 @@ class ArticleClassificationTrainer(object):
     training_data_dir: str
     training_metadata_path: str
     output_model_path: str
+    random_seed: int
 
-    def __init__(self):
-        pass
+    def __init__(self, random_seed: int = DEFAULT_RANDOM_SEED) -> None:
+        self.random_seed = random_seed
 
     def parse_arguments_training(self) -> None:
         """
@@ -156,7 +158,15 @@ class ArticleClassificationTrainer(object):
             required=True,
             help="Objective: [on_topic, quotable, topic, place]",
         )
+        parser.add_argument(
+            "--random_seed",
+            type=int,
+            default=DEFAULT_RANDOM_SEED,
+            help=f"Seed used for train/validation/test splitting (default: {DEFAULT_RANDOM_SEED})",
+        )
         args = parser.parse_args()
+
+        self.random_seed = args.random_seed
 
         # Initialize data directory
         self.data_dir = args.data_dir
@@ -402,9 +412,13 @@ class ArticleClassificationTrainer(object):
         pos_train_df: DataFrame = pd.concat(
             [pos_train_df, posi_train_df], ignore_index=True
         )
-        pos_validation_df = pos_train_df.sample(n=pos_holdout_count)  # type: ignore
+        pos_validation_df = pos_train_df.sample(  # type: ignore
+            n=pos_holdout_count, random_state=self.random_seed
+        )
         pos_train_df = pos_train_df.drop(pos_validation_df.index)
-        pos_test_df = pos_train_df.sample(n=pos_holdout_count)  # type: ignore
+        pos_test_df = pos_train_df.sample(  # type: ignore
+            n=pos_holdout_count, random_state=self.random_seed
+        )
         pos_train_df = pos_train_df.drop(pos_test_df.index)
 
         # Negative direct samples
@@ -430,9 +444,13 @@ class ArticleClassificationTrainer(object):
         neg_holdout_count = min(
             pos_holdout_count, max((neg_train_df.shape[0] - 1) // 2, 0)
         )
-        neg_validation_df = neg_train_df.sample(n=neg_holdout_count)  # type: ignore
+        neg_validation_df = neg_train_df.sample(  # type: ignore
+            n=neg_holdout_count, random_state=self.random_seed
+        )
         neg_train_df = neg_train_df.drop(neg_validation_df.index)
-        neg_test_df = neg_train_df.sample(n=neg_holdout_count)  # type: ignore
+        neg_test_df = neg_train_df.sample(  # type: ignore
+            n=neg_holdout_count, random_state=self.random_seed
+        )
         neg_train_df = neg_train_df.drop(neg_test_df.index)
 
         dataset = Dataset(
@@ -448,11 +466,24 @@ class ArticleClassificationTrainer(object):
                 negative_validation=neg_validation_df.shape[0],
                 negative_test=neg_test_df.shape[0],
             ),
-            data_train=pd.DataFrame(shuffle(pd.concat([pos_train_df, neg_train_df]))),
-            data_validation=pd.DataFrame(
-                shuffle(pd.concat([pos_validation_df, neg_validation_df]))
+            data_train=pd.DataFrame(
+                shuffle(
+                    pd.concat([pos_train_df, neg_train_df]),
+                    random_state=self.random_seed,
+                )
             ),
-            data_test=pd.DataFrame(shuffle(pd.concat([pos_test_df, neg_test_df]))),
+            data_validation=pd.DataFrame(
+                shuffle(
+                    pd.concat([pos_validation_df, neg_validation_df]),
+                    random_state=self.random_seed,
+                )
+            ),
+            data_test=pd.DataFrame(
+                shuffle(
+                    pd.concat([pos_test_df, neg_test_df]),
+                    random_state=self.random_seed,
+                )
+            ),
         )
 
         return dataset
@@ -599,6 +630,7 @@ class ArticleClassificationTrainer(object):
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "objective_type": self.objective_type.value,
             "objective_label": objective_label,
+            "random_seed": self.random_seed,
             "counts": evaluated_model.counts.to_dict(),
             "evaluations": [e.to_dict() for e in evaluated_model.evaluations],
         }

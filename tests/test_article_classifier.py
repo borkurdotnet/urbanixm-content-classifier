@@ -87,3 +87,18 @@ def test_get_data_split_includes_validation_set() -> None:
         *(f"positive-{index}" for index in range(100)),
         *(f"negative-{index}" for index in range(100)),
     }
+
+
+def test_get_data_split_is_reproducible() -> None:
+    trainer = ArticleClassificationTrainer(random_seed=123)
+    texts = Texts(
+        positive_direct=[f"positive-{index}" for index in range(100)],
+        negative_direct=[f"negative-{index}" for index in range(100)],
+    )
+
+    first_dataset = trainer.get_data_spit(texts)
+    second_dataset = trainer.get_data_spit(texts)
+
+    assert first_dataset.data_train.equals(second_dataset.data_train)
+    assert first_dataset.data_validation.equals(second_dataset.data_validation)
+    assert first_dataset.data_test.equals(second_dataset.data_test)
