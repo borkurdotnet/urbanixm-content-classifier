@@ -1,18 +1,33 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.12
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-
   - repo: local
     hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check .
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: ruff-format
+        name: ruff format check
+        entry: uv run ruff format --check .
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: pyright
         name: pyright
-        entry: uv run pyright
+        entry: uv run pyright .
         language: system
-        types: [python]
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        always_run: true
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
