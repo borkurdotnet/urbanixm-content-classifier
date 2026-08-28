@@ -24,33 +24,43 @@ def write_jsonlines(path: Path, records: list[dict[str, object]]) -> None:
             output.write(json.dumps(record) + "\n")
 
 
-def test_load_data_joins_labels_by_url_across_batches(tmp_path: Path) -> None:
+def test_load_data_uses_latest_timestamped_record_for_duplicate_urls(
+    tmp_path: Path,
+) -> None:
     write_jsonlines(
-        tmp_path / "articles_0001.jsonl.gz",
+        tmp_path / "articles_20250716104400_content.jsonl.gz",
         [
-            {"url": "https://example.com/one", "content": "first"},
-            {"url": "https://example.com/two", "content": "second"},
+            {"url": "https://example.com/duplicate", "content": "older"},
+            {"url": "https://example.com/older-only", "content": "older only"},
         ],
     )
     write_jsonlines(
-        tmp_path / "articles_0001_labels.jsonl",
+        tmp_path / "articles_20250716104400_labels.jsonl.gz",
         [
-            {"url": "https://example.com/two", "off_topic": True},
-            {"url": "https://example.com/one", "off_topic": False},
+            {
+                "url": "https://example.com/older-only",
+                "off_topic": False,
+                "topics": {"direct": ["housing"], "derived": []},
+            },
+            {"url": "https://example.com/duplicate", "off_topic": True},
         ],
     )
     write_jsonlines(
-        tmp_path / "articles_0002.jsonl",
+        tmp_path / "articles_20260826170325_content.jsonl.gz",
         [
-            {"url": "https://example.com/three", "content": "third"},
-            {"url": "https://example.com/four", "content": "fourth"},
+            {"url": "https://example.com/newer-only", "content": "newer only"},
+            {"url": "https://example.com/duplicate", "content": "newer"},
         ],
     )
     write_jsonlines(
-        tmp_path / "articles_0002_labels.jsonl",
+        tmp_path / "articles_20260826170325_labels.jsonl.gz",
         [
-            {"url": "https://example.com/four", "off_topic": True},
-            {"url": "https://example.com/three", "off_topic": False},
+            {
+                "url": "https://example.com/duplicate",
+                "off_topic": False,
+                "topics": {"direct": ["mobility"], "derived": []},
+            },
+            {"url": "https://example.com/newer-only", "off_topic": True},
         ],
     )
 
@@ -60,8 +70,14 @@ def test_load_data_joins_labels_by_url_across_batches(tmp_path: Path) -> None:
 
     texts = trainer.load_data(objective_label=None)
 
-    assert texts.positive_direct == ["first", "third"]
-    assert texts.negative_direct == ["second", "fourth"]
+    assert texts.positive_direct == ["newer", "older only"]
+    assert texts.negative_direct == ["newer only"]
+
+    trainer.objective_type = ObjectiveType.TOPICS
+    assert trainer.get_objective_label_stats() == {
+        "mobility": {"direct": 1, "derived": 0},
+        "housing": {"direct": 1, "derived": 0},
+    }
 
 
 def test_iter_training_records_rejects_duplicate_article_urls(tmp_path: Path) -> None:
@@ -417,17 +433,6 @@ def test_train_models_writes_only_eligible_current_objective_artifacts(
     trainer = ArticleClassificationTrainer()
     trainer.objective_type = ObjectiveType.TOPICS
     trainer.output_model_path = str(tmp_path / "models")
-    trainer.training_metadata_path = str(tmp_path / "articles_meta.json")
-    Path(trainer.training_metadata_path).write_text(
-        json.dumps(
-            {
-                "topics": {
-                    "eligible": {"direct": 30, "derived": 0},
-                    "insufficient": {"direct": 29, "derived": 0},
-                }
-            }
-        )
-    )
     objective_dir = Path(trainer.output_model_path) / "topics"
     objective_dir.mkdir(parents=True)
     (objective_dir / "obsolete.json").write_text("{}")
@@ -440,6 +445,14 @@ def test_train_models_writes_only_eligible_current_objective_artifacts(
 
     monkeypatch.setattr(trainer, "load_data", load_data)
     monkeypatch.setattr(trainer, "train_model", train_model)
+    monkeypatch.setattr(
+        trainer,
+        "get_objective_label_stats",
+        lambda: {
+            "eligible": {"direct": 30, "derived": 0},
+            "insufficient": {"direct": 29, "derived": 0},
+        },
+    )
 
     def save_artifact(objective_label: str | None, evaluated_model: Any) -> None:
         objective_dir.mkdir(parents=True, exist_ok=True)

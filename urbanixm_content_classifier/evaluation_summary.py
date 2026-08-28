@@ -40,8 +40,16 @@ class EvaluationSummarizer(object):
     def __init__(self, args: CommandLineArguments) -> None:
         self.cl_arguments = args
 
+    def write_column_descriptions(self, descriptions: dict[str, str]) -> None:
+        self.report_file.write("**Columns**\n\n")
+        for column, description in descriptions.items():
+            self.report_file.write(f"- **{column}**: {description}\n")
+        self.report_file.write("\n")
+
     def generate_summary(self, report_conf: EvaluationReport) -> None:
         self.report_file = open(report_conf.path, "w")
+
+        self.report_file.write("# Urbanixm Content Classifier Evaluation Report\n\n")
 
         for section in report_conf.sections:
             self.report_file.write(f"## {section.title}\n\n")
@@ -92,6 +100,21 @@ class EvaluationSummarizer(object):
                             "TP": test_metrics["true_positive"],
                         }
                     ]
+                )
+                self.write_column_descriptions(
+                    {
+                        "count": "Number of test examples.",
+                        "accuracy": "Share of all predictions that are correct.",
+                        "balanced accuracy": "Mean recall across the positive and negative classes.",
+                        "precision": "Share of positive predictions that are correct.",
+                        "recall": "Share of positive examples correctly identified.",
+                        "f1": "Harmonic mean of precision and recall.",
+                        "average precision": "Precision averaged across recall thresholds.",
+                        "TN": "True negatives.",
+                        "FP": "False positives.",
+                        "FN": "False negatives.",
+                        "TP": "True positives.",
+                    }
                 )
                 self.report_file.write(summary.to_markdown(index=False, floatfmt=".2f"))
                 self.report_file.write("\n\n")
@@ -241,7 +264,30 @@ class EvaluationSummarizer(object):
             by="# pos. train", ascending=False, inplace=True
         )
 
-        self.report_file.write(model_evaluations_df.to_markdown(floatfmt=".2f"))
+        self.write_column_descriptions(
+            {
+                "label": "Topic or place predicted by the classifier.",
+                "# pos. train": "Positive training examples.",
+                "# neg. train": "Negative training examples.",
+                "# pos. test": "Positive test examples.",
+                "# neg. test": "Negative test examples.",
+                "threshold": "Probability cutoff selected on validation F1.",
+                "precision": "Share of positive predictions that are correct.",
+                "recall": "Share of positive examples correctly identified.",
+                "f1": "Harmonic mean of precision and recall.",
+                "balanced acc.": "Mean recall across the positive and negative classes.",
+                "avg. precision": "Precision averaged across recall thresholds.",
+                "@ acc. train": "Overall accuracy on the training set.",
+                "@ acc. test": "Overall accuracy on the test set.",
+                "@ acc. pos. train": "Accuracy on positive training examples.",
+                "@ acc. pos. test": "Accuracy on positive test examples.",
+                "@ acc. neg. train": "Accuracy on negative training examples.",
+                "@ acc. neg. test": "Accuracy on negative test examples.",
+            }
+        )
+        self.report_file.write(
+            model_evaluations_df.to_markdown(index=False, floatfmt=".2f")
+        )
         self.report_file.write("\n\n")
 
     def multiclass_classifier_summary(self, section_conf: ReportSection) -> None:
@@ -294,7 +340,18 @@ class EvaluationSummarizer(object):
             )
         )
 
-        self.report_file.write(model_evaluations_df_display.to_markdown(floatfmt=".2f"))
+        self.write_column_descriptions(
+            {
+                "label": "Type, tone, topic, or place predicted by the classifier.",
+                "instances": "Test examples associated with the label.",
+                "precision": "Share of predictions for the label that are correct.",
+                "recall": "Share of examples with the label correctly identified.",
+                "f1-score": "Harmonic mean of precision and recall.",
+            }
+        )
+        self.report_file.write(
+            model_evaluations_df_display.to_markdown(index=False, floatfmt=".2f")
+        )
         self.report_file.write("\n\n")
 
 

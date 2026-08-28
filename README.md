@@ -96,14 +96,17 @@ gzip-compressed JSONL, while its labels are stored in a correspondingly named
 JSONL file:
 
 ```text
-articles_0001.jsonl.gz
-articles_0001_labels.jsonl
-articles_0002.jsonl.gz
-articles_0002_labels.jsonl
+articles_20250716104400_content.jsonl.gz
+articles_20250716104400_labels.jsonl.gz
+articles_20250716104400_meta.json
+articles_20260826170325_content.jsonl.gz
+articles_20260826170325_labels.jsonl.gz
+articles_20260826170325_meta.json
 ```
 
 Content and label records are matched by their `url` field, so their line order
-does not need to be the same.
+does not need to be the same. When batches overlap, only the content and labels
+from the batch with the latest `YYYYMMDDhhmmss` timestamp are used for each URL.
 
 Article datasets are split reproducibly while preserving the observed positive
 and negative class proportions in the training, validation and test sets. The

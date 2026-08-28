@@ -46,6 +46,7 @@ class ObjectiveType(Enum):
 
 
 @dataclass
+@dataclass
 class Texts:
     positive_direct: list[str] = field(default_factory=list)  # type: ignore
     positive_indirect: list[str] = field(default_factory=list)  # type: ignore
@@ -285,6 +286,7 @@ def build_training_data_provenance(training_data_dir: Path) -> dict[str, Any]:
             *training_data_dir.glob("articles_*.jsonl"),
             *training_data_dir.glob("articles_*.jsonl.gz"),
             *training_data_dir.glob("articles_meta.json"),
+            *training_data_dir.glob("articles_*_meta.json"),
         }
     )
     if not paths:
@@ -356,7 +358,6 @@ class ArticleClassificationTrainer(object):
     data_dir: str
     objective_type: ObjectiveType
     training_data_dir: str
-    training_metadata_path: str
     output_model_path: str
     random_seed: int
     n_jobs: int
@@ -425,9 +426,6 @@ class ArticleClassificationTrainer(object):
         self.training_data_dir = os.path.join(
             self.data_dir, "classifiers", "training-data", "articles"
         )
-        self.training_metadata_path = os.path.join(
-            self.training_data_dir, "articles_meta.json"
-        )
 
         # Set output model path
         self.output_model_path = os.path.join(
@@ -482,15 +480,16 @@ class ArticleClassificationTrainer(object):
             filename = path.name.removesuffix(".gz").removesuffix(".jsonl")
             if filename.endswith("_labels"):
                 continue
-            if filename in content_paths:
-                raise ValueError(f"Multiple content files found for batch {filename}")
-            content_paths[filename] = path
+            batch_name = filename.removesuffix("_content")
+            if batch_name in content_paths:
+                raise ValueError(f"Multiple content files found for batch {batch_name}")
+            content_paths[batch_name] = path
 
         if not content_paths:
             raise FileNotFoundError(f"No article batches found in {training_data_dir}")
 
         seen_urls: set[str] = set()
-        for batch_name, content_path in content_paths.items():
+        for batch_name, content_path in sorted(content_paths.items(), reverse=True):
             label_paths = [
                 path
                 for path in (
@@ -515,18 +514,22 @@ class ArticleClassificationTrainer(object):
                         )
                     labels_by_url[url] = labels
 
+            batch_urls: set[str] = set()
             with self.open_jsonlines(content_path) as content_reader:
                 for article in content_reader:
                     url = article["url"]
-                    if url in seen_urls:
+                    if url in batch_urls:
                         raise ValueError(f"Duplicate article URL {url!r}")
-                    seen_urls.add(url)
+                    batch_urls.add(url)
                     try:
                         labels = labels_by_url.pop(url)
                     except KeyError as error:
                         raise ValueError(
                             f"No labels found for URL {url!r} in {content_path.name}"
                         ) from error
+                    if url in seen_urls:
+                        continue
+                    seen_urls.add(url)
                     yield article | labels
 
             if labels_by_url:
@@ -993,6 +996,17 @@ class ArticleClassificationTrainer(object):
             logging.info("Removing stale models from %s", objective_model_path)
             shutil.rmtree(objective_model_path)
 
+    def get_objective_label_stats(self) -> dict[str, dict[str, int]]:
+        label_stats: dict[str, dict[str, int]] = {}
+        for record in self.iter_training_records():
+            if record["off_topic"]:
+                continue
+            for source in ("direct", "derived"):
+                for label in record[self.objective_type.value][source]:
+                    stats = label_stats.setdefault(label, {"direct": 0, "derived": 0})
+                    stats[source] += 1
+        return label_stats
+
     def train_models(self) -> None:
         """
         Trains the appropriate models using information passed on the command line
@@ -1014,15 +1028,11 @@ class ArticleClassificationTrainer(object):
 
             return
 
-        # Read training data meta-data to get information about training data counts
-        # for individual topics and places
-        with open(self.training_metadata_path) as fh:
-            training_data_metadata = json.load(fh)
-            fh.close()
+        label_stats = self.get_objective_label_stats()
 
         if self.objective_type == ObjectiveType.TOPICS:
             # Train a classifier for each topic with sufficient training data
-            for topic_label, topic_stats in training_data_metadata["topics"].items():
+            for topic_label, topic_stats in label_stats.items():
                 # Train a classifier for topic with label topic_label
                 training_instances = topic_stats["direct"] + topic_stats["derived"]
                 logging.info(
@@ -1042,7 +1052,7 @@ class ArticleClassificationTrainer(object):
 
         if self.objective_type == ObjectiveType.PLACES:
             # Train a classifier for each place with sufficient training data
-            for place_label, place_stats in training_data_metadata["places"].items():
+            for place_label, place_stats in label_stats.items():
                 # Train a classifier for place with label place_label
                 training_instances = place_stats["direct"] + place_stats["derived"]
                 logging.info(
