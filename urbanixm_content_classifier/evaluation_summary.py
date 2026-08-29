@@ -46,6 +46,76 @@ class EvaluationSummarizer(object):
             self.report_file.write(f"- **{column}**: {description}\n")
         self.report_file.write("\n")
 
+    @staticmethod
+    def evaluation_target(evaluation: dict[str, Any]) -> int | None:
+        if "target" in evaluation:
+            return evaluation["target"]
+        if evaluation["label"].startswith("positive_"):
+            return 1
+        if evaluation["label"].startswith("negative_"):
+            return 0
+        return None
+
+    def write_sub_label_results(
+        self, reports: list[tuple[str | None, dict[str, Any]]]
+    ) -> None:
+        report_rows: list[tuple[str | None, list[dict[str, Any]]]] = []
+        for classifier, report in reports:
+            rows: list[dict[str, Any]] = []
+            for evaluation in report["evaluations"]:
+                target = self.evaluation_target(evaluation)
+                if target is None:
+                    continue
+                row: dict[str, Any] = {
+                    "sub-label": evaluation["label"],
+                    "description": evaluation.get("description", "Not recorded"),
+                    "target": "positive" if target == 1 else "negative",
+                    "weight multiplier": evaluation.get(
+                        "weight_multiplier",
+                        0.75 if evaluation["label"] == "positive_indirect" else 1.0,
+                    ),
+                }
+                for split in ("train", "validation", "test"):
+                    result = evaluation["evaluation"][split]
+                    row[f"{split} count"] = result["count"]
+                    row[f"{split} accuracy"] = result["accuracy"]
+                    row[f"{split} mean p(+)"] = result.get(
+                        "mean_positive_probability", "Not recorded"
+                    )
+                rows.append(row)
+            if rows:
+                report_rows.append((classifier, rows))
+
+        if not report_rows:
+            return
+
+        self.report_file.write("### Sub-label results\n\n")
+        column_descriptions = {
+            "sub-label": "Semantic sample group evaluated separately.",
+            "target": "Binary class assigned to every sample in the group.",
+            "weight multiplier": "Training weight applied after class balancing.",
+            "train/validation/test count": "Samples from the group in each split.",
+            "train/validation/test accuracy": "Correct prediction rate within the group.",
+            "train/validation/test mean p(+)": "Mean predicted positive-class probability within the group.",
+        }
+        include_classifier_sections = any(
+            classifier is not None for classifier, _ in report_rows
+        )
+        for classifier, rows in report_rows:
+            if include_classifier_sections:
+                self.report_file.write(f"#### {classifier}\n\n")
+            self.report_file.write("**Sub-labels**\n\n")
+            for row in rows:
+                self.report_file.write(
+                    f"- **{row['sub-label']}**: {row.pop('description')}\n"
+                )
+            self.report_file.write("\n")
+            self.write_column_descriptions(column_descriptions)
+            self.report_file.write(
+                pd.DataFrame(rows).to_markdown(index=False, floatfmt=".2f")
+            )
+            self.report_file.write("\n\n")
+
     def generate_summary(self, report_conf: EvaluationReport) -> None:
         self.report_file = open(report_conf.path, "w")
 
@@ -118,6 +188,7 @@ class EvaluationSummarizer(object):
                 )
                 self.report_file.write(summary.to_markdown(index=False, floatfmt=".2f"))
                 self.report_file.write("\n\n")
+                self.write_sub_label_results([(None, evaluation_report)])
                 return
 
             for evaluation in evaluation_report["evaluations"]:
@@ -131,6 +202,7 @@ class EvaluationSummarizer(object):
             return
 
         model_evaluations: list[Any] = []
+        reports: list[tuple[str | None, dict[str, Any]]] = []
 
         for model in os.listdir(
             os.path.join(
@@ -158,6 +230,9 @@ class EvaluationSummarizer(object):
                 ) as fp:
                     evaluation_report = json.load(fp)
                     model_evaluation["label"] = evaluation_report["objective_label"]
+                    reports.append(
+                        (evaluation_report["objective_label"], evaluation_report)
+                    )
 
                     model_evaluation["# pos. train"] = evaluation_report["counts"][
                         "positive_train"
@@ -204,10 +279,8 @@ class EvaluationSummarizer(object):
                                 "test"
                             ]["accuracy"]
 
-                        if evaluation["label"] in [
-                            "positive_direct",
-                            "positive_indirect",
-                        ]:
+                        target = self.evaluation_target(evaluation)
+                        if target == 1:
                             acc_pos_train += (
                                 evaluation["evaluation"]["train"]["count"]
                                 * evaluation["evaluation"]["train"]["accuracy"]
@@ -223,10 +296,7 @@ class EvaluationSummarizer(object):
                                 "count"
                             ]
 
-                        if evaluation["label"] in [
-                            "negative_direct",
-                            "negative_indirect",
-                        ]:
+                        if target == 0:
                             acc_neg_train += (
                                 evaluation["evaluation"]["train"]["count"]
                                 * evaluation["evaluation"]["train"]["accuracy"]
@@ -244,15 +314,23 @@ class EvaluationSummarizer(object):
 
                     model_evaluation["@ acc. pos. train"] = (
                         acc_pos_train / acc_pos_train_count
+                        if acc_pos_train_count
+                        else pd.NA
                     )
                     model_evaluation["@ acc. pos. test"] = (
                         acc_pos_test / acc_pos_test_count
+                        if acc_pos_test_count
+                        else pd.NA
                     )
                     model_evaluation["@ acc. neg. train"] = (
                         acc_neg_train / acc_neg_train_count
+                        if acc_neg_train_count
+                        else pd.NA
                     )
                     model_evaluation["@ acc. neg. test"] = (
                         acc_neg_test / acc_neg_test_count
+                        if acc_neg_test_count
+                        else pd.NA
                     )
 
                     model_evaluations.append(model_evaluation)
@@ -289,6 +367,7 @@ class EvaluationSummarizer(object):
             model_evaluations_df.to_markdown(index=False, floatfmt=".2f")
         )
         self.report_file.write("\n\n")
+        self.write_sub_label_results(reports)
 
     def multiclass_classifier_summary(self, section_conf: ReportSection) -> None:
         if section_conf.model_name is None:

@@ -34,7 +34,7 @@ logging.basicConfig(
 
 POSITIVE_TEST_COUNT_MIN = 10
 DEFAULT_RANDOM_SEED = 42
-METADATA_SCHEMA_VERSION = 1
+METADATA_SCHEMA_VERSION = 2
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -46,40 +46,114 @@ class ObjectiveType(Enum):
 
 
 @dataclass
+class SubLabel:
+    name: str
+    description: str
+    target: int
+    weight_multiplier: float = 1.0
+    samples: list[str] = field(default_factory=list)  # type: ignore
+
+    def __post_init__(self) -> None:
+        if self.target not in (0, 1):
+            raise ValueError("Sub-label target must be 0 or 1")
+        if self.weight_multiplier < 0:
+            raise ValueError("Sub-label weight multiplier cannot be negative")
+
+
 @dataclass
-class Texts:
-    positive_direct: list[str] = field(default_factory=list)  # type: ignore
-    positive_indirect: list[str] = field(default_factory=list)  # type: ignore
-    negative_direct: list[str] = field(default_factory=list)  # type: ignore
-    negative_indirect: list[str] = field(default_factory=list)  # type: ignore
+class SubLabelCounts:
+    train: int
+    validation: int
+    test: int
+
+
+def build_sub_labels(objective_type: ObjectiveType) -> list[SubLabel]:
+    if objective_type == ObjectiveType.ON_TOPIC:
+        return [
+            SubLabel(
+                name="on-topic",
+                description="Article is directly labelled as related to urbanism.",
+                target=1,
+            ),
+            SubLabel(
+                name="off-topic",
+                description="Article is directly labelled as unrelated to urbanism.",
+                target=0,
+            ),
+        ]
+    if objective_type == ObjectiveType.QUOTABLE:
+        return [
+            SubLabel(
+                name="quotable",
+                description="Urbanism article is directly labelled quotable.",
+                target=1,
+            ),
+            SubLabel(
+                name="unquotable",
+                description="Article is about urbanism but directly labelled as unquotable.",
+                target=0,
+            ),
+            SubLabel(
+                name="off-topic",
+                description="Article is unrelated to urbanism and therefore not quotable.",
+                target=0,
+            ),
+        ]
+    objective_name = "topic" if objective_type == ObjectiveType.TOPICS else "place"
+    return [
+        SubLabel(
+            name="direct",
+            description=f"Article is directly assigned the target {objective_name}.",
+            target=1,
+        ),
+        SubLabel(
+            name="derived",
+            description=f"Article is assigned the target {objective_name} through hierarchy derivation.",
+            target=1,
+            weight_multiplier=0.75,
+        ),
+        SubLabel(
+            name="other-topic"
+            if objective_type == ObjectiveType.TOPICS
+            else "other-place",
+            description=f"Urbanism article is not assigned the target {objective_name}.",
+            target=0,
+        ),
+        SubLabel(
+            name="off-topic",
+            description="Article is directly labelled as unrelated to urbanism.",
+            target=0,
+        ),
+    ]
 
 
 @dataclass
 class DatasetCounts:
-    positive_direct: int
-    positive_indirect: int
-    negative_direct: int
-    negative_indirect: int
     positive_train: int
     positive_validation: int
     positive_test: int
     negative_train: int
     negative_validation: int
     negative_test: int
+    sub_labels: dict[str, SubLabelCounts]
 
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
         return {
-            "positive_direct": self.positive_direct,
-            "positive_indirect": self.positive_indirect,
-            "negative_direct": self.negative_direct,
-            "negative_indirect": self.negative_indirect,
             "positive_train": self.positive_train,
             "positive_validation": self.positive_validation,
             "positive_test": self.positive_test,
             "negative_train": self.negative_train,
             "negative_validation": self.negative_validation,
             "negative_test": self.negative_test,
+            "sub_labels": {
+                name: {
+                    "train": counts.train,
+                    "validation": counts.validation,
+                    "test": counts.test,
+                }
+                for name, counts in self.sub_labels.items()
+            },
         }
 
 
@@ -95,6 +169,7 @@ class Dataset:
 class EvaluationResult:
     accuracy: float
     count: int
+    mean_positive_probability: float
 
 
 @dataclass
@@ -106,12 +181,21 @@ class Evaluation:
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
         return {
-            "train": {"accuracy": self.train.accuracy, "count": self.train.count},
+            "train": {
+                "accuracy": self.train.accuracy,
+                "count": self.train.count,
+                "mean_positive_probability": self.train.mean_positive_probability,
+            },
             "validation": {
                 "accuracy": self.validation.accuracy,
                 "count": self.validation.count,
+                "mean_positive_probability": self.validation.mean_positive_probability,
             },
-            "test": {"accuracy": self.test.accuracy, "count": self.test.count},
+            "test": {
+                "accuracy": self.test.accuracy,
+                "count": self.test.count,
+                "mean_positive_probability": self.test.mean_positive_probability,
+            },
         }
 
 
@@ -163,16 +247,30 @@ class ClassificationEvaluation:
 class LabelledEvaluation:
     label: str
     evaluation: Evaluation
+    description: str | None = None
+    target: int | None = None
+    weight_multiplier: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         # Return a json serializable dict
-        return {"label": self.label, "evaluation": self.evaluation.to_dict()}
+        result: dict[str, Any] = {
+            "label": self.label,
+            "evaluation": self.evaluation.to_dict(),
+        }
+        if self.description is not None:
+            result["description"] = self.description
+        if self.target is not None:
+            result["target"] = self.target
+        if self.weight_multiplier is not None:
+            result["weight_multiplier"] = self.weight_multiplier
+        return result
 
 
 @dataclass
 class EvaluatedModel:
     model: Any
     counts: DatasetCounts
+    sub_labels: list[SubLabel]
     evaluations: list[LabelledEvaluation]
     decision_threshold: float
     metrics: ClassificationEvaluation
@@ -186,6 +284,15 @@ class EvaluatedModel:
         # Return a json serializable dict
         return {
             "counts": self.counts,
+            "sub_labels": [
+                {
+                    "name": sub_label.name,
+                    "description": sub_label.description,
+                    "target": sub_label.target,
+                    "weight_multiplier": sub_label.weight_multiplier,
+                }
+                for sub_label in self.sub_labels
+            ],
             "evaluations": [e.to_dict() for e in self.evaluations],
             "decision_threshold": self.decision_threshold,
             "metrics": self.metrics.to_dict(),
@@ -432,41 +539,37 @@ class ArticleClassificationTrainer(object):
             self.data_dir, "classifiers", "models", "final", "article_models"
         )
 
-    def load_data(self, objective_label: str | None) -> Texts:
+    def load_data(self, objective_label: str | None) -> list[SubLabel]:
         """
         Load the training and testing data
 
         :param objective_label: The topic or place label, when appropriate
         """
 
-        texts = Texts()
         if (
             self.objective_type == ObjectiveType.ON_TOPIC
             or self.objective_type == ObjectiveType.QUOTABLE
         ):
             # We are training a model for estimating if a web-page is on the general topic of urbanism
             # or a model for estimating if an urbanism web-page is content rich (quotable)
-            texts = self.load_data_unlabelled(self.iter_training_records())
+            return self.load_data_unlabelled(self.iter_training_records())
         elif (
             self.objective_type == ObjectiveType.TOPICS and objective_label is not None
         ):
             # We are training a model for estimating if a web-page is on a specific urbanism topic
-            texts = self.load_data_labelled(
+            return self.load_data_labelled(
                 objective_label, self.iter_training_records()
             )
         elif (
             self.objective_type == ObjectiveType.PLACES and objective_label is not None
         ):
             # We are training a model for estimating if a web-page is talking about a specific plce
-            texts = self.load_data_labelled(
+            return self.load_data_labelled(
                 objective_label, self.iter_training_records()
             )
-        else:
-            print(
-                f"Unknown objective type or label: {self.objective_type}/{objective_label}"
-            )
-
-        return texts
+        raise ValueError(
+            f"Unknown objective type or label: {self.objective_type}/{objective_label}"
+        )
 
     def iter_training_records(self) -> Iterator[dict[str, Any]]:
         training_data_dir = Path(self.training_data_dir)
@@ -544,7 +647,9 @@ class ArticleClassificationTrainer(object):
             return jsonlines.Reader(gzip.open(path, mode="rt"))
         return jsonlines.Reader(path.open())
 
-    def load_data_unlabelled(self, json_objects: Iterable[dict[str, Any]]) -> Texts:
+    def load_data_unlabelled(
+        self, json_objects: Iterable[dict[str, Any]]
+    ) -> list[SubLabel]:
         """
         Load data for the two special classification classes 'on-topic' and 'quotable',
         which consider, respectively, any article on urbanism to be positive
@@ -553,29 +658,33 @@ class ArticleClassificationTrainer(object):
         :param json_objects:
         :return:
         """
-        texts = Texts()
+        sub_labels = build_sub_labels(self.objective_type)
+        samples_by_name = {
+            sub_label.name: sub_label.samples for sub_label in sub_labels
+        }
         for json_object in json_objects:
             text: str = json_object["content"]
 
             if json_object["off_topic"]:
                 # Article is off topic
-                texts.negative_direct.append(text)
+                samples_by_name["off-topic"].append(text)
             else:
                 # Article is on topic
-                if (
-                    self.objective_type == ObjectiveType.QUOTABLE
-                    and json_object["un_quotable"]
-                ):
-                    # Article is on topic but unquotable (archive or something like that)
-                    texts.negative_indirect.append(text)
+                if self.objective_type == ObjectiveType.QUOTABLE:
+                    if json_object["un_quotable"]:
+                        # Article is on topic but unquotable (archive or something like that)
+                        samples_by_name["unquotable"].append(text)
+                    else:
+                        # Article is on topic and quotable
+                        samples_by_name["quotable"].append(text)
                 else:
                     # Article is on topic and quotable
-                    texts.positive_direct.append(text)
-        return texts
+                    samples_by_name["on-topic"].append(text)
+        return sub_labels
 
     def load_data_labelled(
         self, objective_label: str, json_objects: Iterable[dict[str, Any]]
-    ) -> Texts:
+    ) -> list[SubLabel]:
         """
         Loads the data from the json_reader creates appropriate training and testing texts
         given the topic/place label being processed
@@ -583,48 +692,61 @@ class ArticleClassificationTrainer(object):
         :param objective_label: The label of the topic or the place being processed
         :param json_objects: Article content merged with its labels
 
-        :returns: A Texts object with the texts from the input data
+        :returns: Sub-label definitions populated with texts from the input data
         """
-        texts = Texts()
+        sub_labels = build_sub_labels(self.objective_type)
+        samples_by_name = {
+            sub_label.name: sub_label.samples for sub_label in sub_labels
+        }
         for json_object in json_objects:
             text: str = json_object["content"]
             if json_object["off_topic"]:
                 # Article is not about urbanism
-                texts.negative_direct.append(text)
+                samples_by_name["off-topic"].append(text)
             else:
                 # Article is on topic
                 if objective_label in json_object[self.objective_type.value]["direct"]:
                     # Article has been annotated directly on topic
-                    texts.positive_direct.append(text)
+                    samples_by_name["direct"].append(text)
                 elif (
                     objective_label in json_object[self.objective_type.value]["derived"]
                 ):
                     # Article has been derived to be on topic
-                    texts.positive_indirect.append(text)
+                    samples_by_name["derived"].append(text)
                 else:
                     # Article is about urbanism but not on the desired objective label (topic or place)
-                    texts.negative_indirect.append(text)
-        return texts
+                    if self.objective_type == ObjectiveType.TOPICS:
+                        samples_by_name["other-topic"].append(text)
+                    else:
+                        samples_by_name["other-place"].append(text)
+        return sub_labels
 
-    def get_data_spit(self, texts: Texts) -> Dataset:
+    def get_data_spit(self, sub_labels: list[SubLabel]) -> Dataset:
         """
         Split the task's training data in to train/validation/test sets
 
-        :param texts: is a collection of texts used for training and testing
+        :param sub_labels: semantic sample groups used for training and testing
 
-        :return: Dataset where data fields are dataframes with columns ['text','label','weight','p/n','d/i']
+        :return: Dataset with text, label, weight and sub_label columns
 
         where:
             - __text__ is the text of an article
             - __label__ is 0 if negative and 1 if positive
-            - __weight__ is the weight based on the negative/positive and direct/indirect values
-            - __p/n__ 'positive' or 'negative'
-            - __d/i__ 'direct' or 'indirect'
+            - __weight__ combines class balancing with the sub-label multiplier
+            - __sub_label__ identifies the semantic sample group
         """
 
+        sub_label_names = [sub_label.name for sub_label in sub_labels]
+        if len(sub_label_names) != len(set(sub_label_names)):
+            raise ValueError("Sub-label names must be unique")
+
         # Reserve roughly 10% of positive cases for each holdout set.
-        positive_count = len(texts.positive_direct) + len(texts.positive_indirect)
-        negative_count = len(texts.negative_direct) + len(texts.negative_indirect)
+        positive_count = sum(
+            len(sub_label.samples) for sub_label in sub_labels if sub_label.target == 1
+        )
+        negative_count = sum(
+            len(sub_label.samples) for sub_label in sub_labels if sub_label.target == 0
+        )
         if positive_count == 0 or negative_count == 0:
             raise ValueError(
                 "Article classification requires both positive and negative examples"
@@ -635,27 +757,23 @@ class ArticleClassificationTrainer(object):
         )
         pos_neg_ratio = positive_count / negative_count
 
-        # Positive direct samples
-        pos_train_df = pd.DataFrame(data=texts.positive_direct, columns=["text"])
-        if len(texts.positive_direct) > 0:
-            pos_train_df["label"] = 1
-            pos_train_df["weight"] = 1.0
-            pos_train_df["p/n"] = "positive"
-            pos_train_df["d/i"] = "direct"
-
-        # Positive indirect samples (with 75% weight)
-        posi_train_df: DataFrame = DataFrame(
-            data=texts.positive_indirect, columns=["text"]
-        )
-        if len(texts.positive_indirect) > 0:
-            posi_train_df["label"] = 1
-            posi_train_df["weight"] = 0.75
-            posi_train_df["p/n"] = "positive"
-            posi_train_df["d/i"] = "indirect"
+        sub_label_frames: list[DataFrame] = []
+        for sub_label in sub_labels:
+            frame = DataFrame(data=sub_label.samples, columns=["text"])
+            frame["label"] = sub_label.target
+            class_weight = 1.0 if sub_label.target == 1 else pos_neg_ratio
+            frame["weight"] = class_weight * sub_label.weight_multiplier
+            frame["sub_label"] = sub_label.name
+            sub_label_frames.append(frame)
 
         # Positive train/validation/test split
-        pos_train_df: DataFrame = pd.concat(
-            [pos_train_df, posi_train_df], ignore_index=True
+        pos_train_df = pd.concat(
+            [
+                frame
+                for frame, sub_label in zip(sub_label_frames, sub_labels)
+                if sub_label.target == 1
+            ],
+            ignore_index=True,
         )
         pos_validation_df = pos_train_df.sample(  # type: ignore
             n=pos_holdout_count, random_state=self.random_seed
@@ -666,25 +784,14 @@ class ArticleClassificationTrainer(object):
         )
         pos_train_df = pos_train_df.drop(pos_test_df.index)
 
-        # Negative direct samples
-        neg_train_df = DataFrame(data=texts.negative_direct, columns=["text"])
-        if len(texts.negative_direct) > 0:
-            neg_train_df["label"] = 0
-            neg_train_df["weight"] = pos_neg_ratio
-            neg_train_df["p/n"] = "negative"
-            neg_train_df["d/i"] = "direct"
-
-        # Negative indirect samples (with weight equal to the ratio between positive and negative data)
-        negi_train_df = DataFrame(data=texts.negative_indirect, columns=["text"])
-        if len(texts.negative_indirect) > 0:
-            negi_train_df["label"] = 0
-            negi_train_df["weight"] = pos_neg_ratio
-            negi_train_df["p/n"] = "negative"
-            negi_train_df["d/i"] = "indirect"
-
         # Negative train/validation/test split
-        neg_train_df: DataFrame = pd.concat(
-            [neg_train_df, negi_train_df], ignore_index=True
+        neg_train_df = pd.concat(
+            [
+                frame
+                for frame, sub_label in zip(sub_label_frames, sub_labels)
+                if sub_label.target == 0
+            ],
+            ignore_index=True,
         )
         holdout_fraction = pos_holdout_count / positive_count
         neg_holdout_count = min(
@@ -702,16 +809,34 @@ class ArticleClassificationTrainer(object):
 
         dataset = Dataset(
             counts=DatasetCounts(
-                positive_direct=len(texts.positive_direct),
-                positive_indirect=len(texts.positive_indirect),
-                negative_direct=len(texts.negative_direct),
-                negative_indirect=len(texts.negative_indirect),
                 positive_train=pos_train_df.shape[0],
                 positive_validation=pos_validation_df.shape[0],
                 positive_test=pos_test_df.shape[0],
                 negative_train=neg_train_df.shape[0],
                 negative_validation=neg_validation_df.shape[0],
                 negative_test=neg_test_df.shape[0],
+                sub_labels={
+                    sub_label.name: SubLabelCounts(
+                        train=int(
+                            (pos_train_df["sub_label"] == sub_label.name).sum()
+                            if sub_label.target == 1
+                            else (neg_train_df["sub_label"] == sub_label.name).sum()
+                        ),
+                        validation=int(
+                            (pos_validation_df["sub_label"] == sub_label.name).sum()
+                            if sub_label.target == 1
+                            else (
+                                neg_validation_df["sub_label"] == sub_label.name
+                            ).sum()
+                        ),
+                        test=int(
+                            (pos_test_df["sub_label"] == sub_label.name).sum()
+                            if sub_label.target == 1
+                            else (neg_test_df["sub_label"] == sub_label.name).sum()
+                        ),
+                    )
+                    for sub_label in sub_labels
+                },
             ),
             data_train=pd.DataFrame(
                 shuffle(
@@ -735,13 +860,13 @@ class ArticleClassificationTrainer(object):
 
         return dataset
 
-    def train_model(self, texts: Texts) -> EvaluatedModel:
+    def train_model(self, sub_labels: list[SubLabel]) -> EvaluatedModel:
         """
         Takes a set of text objects and trains a model.
         The model is evaluated along several metrics to get a complete understanding of the model performance.
         """
 
-        training_data = self.get_data_spit(texts)
+        training_data = self.get_data_spit(sub_labels)
 
         parameters: dict[str, Any] = {
             "vect__ngram_range": [(1, 1), (1, 2)],
@@ -833,70 +958,81 @@ class ArticleClassificationTrainer(object):
                 train=EvaluationResult(
                     accuracy=classification_evaluation.train.accuracy,
                     count=training_data.data_train.shape[0],
+                    mean_positive_probability=float(
+                        sum(split_probabilities["train"])
+                        / len(split_probabilities["train"])
+                    ),
                 ),
                 validation=EvaluationResult(
                     accuracy=classification_evaluation.validation.accuracy,
                     count=training_data.data_validation.shape[0],
+                    mean_positive_probability=float(
+                        sum(split_probabilities["validation"])
+                        / len(split_probabilities["validation"])
+                    ),
                 ),
                 test=EvaluationResult(
                     accuracy=classification_evaluation.test.accuracy,
                     count=training_data.data_test.shape[0],
+                    mean_positive_probability=float(
+                        sum(split_probabilities["test"])
+                        / len(split_probabilities["test"])
+                    ),
                 ),
             ),
         )
         collected_evaluation.append(overall_evaluation)
 
-        # Source accuracy
-        for sign in ["positive", "negative"]:
-            for direction in ["direct", "indirect"]:
-                train_sub = training_data.data_train[
-                    training_data.data_train["p/n"] == sign
-                ]
-                train_sub = train_sub[train_sub["d/i"] == direction]
-                test_sub = training_data.data_test[
-                    training_data.data_test["p/n"] == sign
-                ]
-                test_sub = test_sub[test_sub["d/i"] == direction]
-                validation_sub = training_data.data_validation[
-                    training_data.data_validation["p/n"] == sign
-                ]
-                validation_sub = validation_sub[validation_sub["d/i"] == direction]
+        for sub_label in sub_labels:
+            split_data = {
+                "train": training_data.data_train[
+                    training_data.data_train["sub_label"] == sub_label.name
+                ],
+                "validation": training_data.data_validation[
+                    training_data.data_validation["sub_label"] == sub_label.name
+                ],
+                "test": training_data.data_test[
+                    training_data.data_test["sub_label"] == sub_label.name
+                ],
+            }
 
-                if train_sub.shape[0] > 0:
-                    evaluation = LabelledEvaluation(
-                        label=f"{sign}_{direction}",
-                        evaluation=Evaluation(
-                            train=EvaluationResult(
-                                accuracy=self.score_at_threshold(
-                                    gs_clf, train_sub, decision_threshold
-                                )
-                                if train_sub.shape[0] > 0
-                                else 0.0,
-                                count=train_sub.shape[0],
-                            ),
-                            validation=EvaluationResult(
-                                accuracy=self.score_at_threshold(
-                                    gs_clf, validation_sub, decision_threshold
-                                )
-                                if validation_sub.shape[0] > 0
-                                else 0.0,
-                                count=validation_sub.shape[0],
-                            ),
-                            test=EvaluationResult(
-                                accuracy=self.score_at_threshold(
-                                    gs_clf, test_sub, decision_threshold
-                                )
-                                if test_sub.shape[0] > 0
-                                else 0.0,
-                                count=test_sub.shape[0],
-                            ),
-                        ),
-                    )
-                    collected_evaluation.append(evaluation)
+            def evaluate_split(split: str) -> EvaluationResult:
+                data = split_data[split]
+                probabilities = (
+                    self.get_positive_probabilities(gs_clf, data)
+                    if data.shape[0] > 0
+                    else []
+                )
+                return EvaluationResult(
+                    accuracy=self.score_at_threshold(gs_clf, data, decision_threshold)
+                    if data.shape[0] > 0
+                    else 0.0,
+                    count=data.shape[0],
+                    mean_positive_probability=(
+                        float(sum(probabilities) / len(probabilities))
+                        if probabilities
+                        else 0.0
+                    ),
+                )
+
+            collected_evaluation.append(
+                LabelledEvaluation(
+                    label=sub_label.name,
+                    description=sub_label.description,
+                    target=sub_label.target,
+                    weight_multiplier=sub_label.weight_multiplier,
+                    evaluation=Evaluation(
+                        train=evaluate_split("train"),
+                        validation=evaluate_split("validation"),
+                        test=evaluate_split("test"),
+                    ),
+                )
+            )
 
         return EvaluatedModel(
             model=gs_clf,
             counts=training_data.counts,
+            sub_labels=sub_labels,
             evaluations=collected_evaluation,
             decision_threshold=decision_threshold,
             metrics=classification_evaluation,
@@ -965,6 +1101,24 @@ class ArticleClassificationTrainer(object):
             "selection_metric": evaluated_model.selection_metric,
             "n_jobs": evaluated_model.n_jobs,
             "counts": evaluated_model.counts.to_dict(),
+            "sub_labels": [
+                {
+                    "name": sub_label.name,
+                    "description": sub_label.description,
+                    "target": sub_label.target,
+                    "weight_multiplier": sub_label.weight_multiplier,
+                    "counts": {
+                        "train": evaluated_model.counts.sub_labels[
+                            sub_label.name
+                        ].train,
+                        "validation": evaluated_model.counts.sub_labels[
+                            sub_label.name
+                        ].validation,
+                        "test": evaluated_model.counts.sub_labels[sub_label.name].test,
+                    },
+                }
+                for sub_label in evaluated_model.sub_labels
+            ],
             "evaluations": [e.to_dict() for e in evaluated_model.evaluations],
             "metrics": evaluated_model.metrics.to_dict(),
         }
@@ -1020,8 +1174,8 @@ class ArticleClassificationTrainer(object):
             or self.objective_type == ObjectiveType.QUOTABLE
         ):
             # Train a single model for either the on-topic class or quotable class
-            texts = self.load_data(objective_label=None)
-            evaluated_model = self.train_model(texts)
+            sub_labels = self.load_data(objective_label=None)
+            evaluated_model = self.train_model(sub_labels)
             self.save_classifier_model(
                 objective_label=None, evaluated_model=evaluated_model
             )
@@ -1044,8 +1198,8 @@ class ArticleClassificationTrainer(object):
                     )
                     continue
 
-                texts = self.load_data(objective_label=topic_label)
-                evaluated_model = self.train_model(texts)
+                sub_labels = self.load_data(objective_label=topic_label)
+                evaluated_model = self.train_model(sub_labels)
                 self.save_classifier_model(
                     objective_label=topic_label, evaluated_model=evaluated_model
                 )
@@ -1064,8 +1218,8 @@ class ArticleClassificationTrainer(object):
                     )
                     continue
 
-                texts = self.load_data(objective_label=place_label)
-                evaluated_model = self.train_model(texts)
+                sub_labels = self.load_data(objective_label=place_label)
+                evaluated_model = self.train_model(sub_labels)
                 self.save_classifier_model(
                     objective_label=place_label, evaluated_model=evaluated_model
                 )

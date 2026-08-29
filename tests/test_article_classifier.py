@@ -10,7 +10,7 @@ import pytest
 from urbanixm_content_classifier.article_classifier import (
     ArticleClassificationTrainer,
     ObjectiveType,
-    Texts,
+    SubLabel,
     build_training_data_provenance,
     calculate_classification_metrics,
     select_decision_threshold,
@@ -22,6 +22,45 @@ def write_jsonlines(path: Path, records: list[dict[str, object]]) -> None:
     with opener(path, "wt") as output:
         for record in records:
             output.write(json.dumps(record) + "\n")
+
+
+def make_sub_labels(
+    positive_direct: list[str] | None = None,
+    positive_indirect: list[str] | None = None,
+    negative_direct: list[str] | None = None,
+    negative_indirect: list[str] | None = None,
+) -> list[SubLabel]:
+    return [
+        SubLabel(
+            name="positive_direct",
+            description="Direct positive test samples.",
+            target=1,
+            samples=positive_direct or [],
+        ),
+        SubLabel(
+            name="positive_indirect",
+            description="Indirect positive test samples.",
+            target=1,
+            weight_multiplier=0.75,
+            samples=positive_indirect or [],
+        ),
+        SubLabel(
+            name="negative_direct",
+            description="Direct negative test samples.",
+            target=0,
+            samples=negative_direct or [],
+        ),
+        SubLabel(
+            name="negative_indirect",
+            description="Indirect negative test samples.",
+            target=0,
+            samples=negative_indirect or [],
+        ),
+    ]
+
+
+def samples_by_sub_label(sub_labels: list[SubLabel]) -> dict[str, list[str]]:
+    return {sub_label.name: sub_label.samples for sub_label in sub_labels}
 
 
 def test_load_data_uses_latest_timestamped_record_for_duplicate_urls(
@@ -68,10 +107,11 @@ def test_load_data_uses_latest_timestamped_record_for_duplicate_urls(
     trainer.training_data_dir = str(tmp_path)
     trainer.objective_type = ObjectiveType.ON_TOPIC
 
-    texts = trainer.load_data(objective_label=None)
+    sub_labels = trainer.load_data(objective_label=None)
+    samples = samples_by_sub_label(sub_labels)
 
-    assert texts.positive_direct == ["newer", "older only"]
-    assert texts.negative_direct == ["newer only"]
+    assert samples["on-topic"] == ["newer", "older only"]
+    assert samples["off-topic"] == ["newer only"]
 
     trainer.objective_type = ObjectiveType.TOPICS
     assert trainer.get_objective_label_stats() == {
@@ -160,49 +200,84 @@ def test_label_sources_determine_classes_and_sample_weights() -> None:
         },
     ]
 
-    texts = trainer.load_data_labelled("target", records)
+    sub_labels = trainer.load_data_labelled("target", records)
+    samples = samples_by_sub_label(sub_labels)
 
-    assert texts.positive_direct == ["direct"]
-    assert texts.positive_indirect == ["derived"]
-    assert texts.negative_indirect == ["other topic"]
-    assert texts.negative_direct == ["off topic"]
+    assert samples["direct"] == ["direct"]
+    assert samples["derived"] == ["derived"]
+    assert samples["other-topic"] == ["other topic"]
+    assert samples["off-topic"] == ["off topic"]
 
-    weighted_texts = Texts(
+    weighted_sub_labels = make_sub_labels(
         positive_direct=[f"positive-direct-{index}" for index in range(20)],
         positive_indirect=[f"positive-indirect-{index}" for index in range(20)],
         negative_direct=[f"negative-direct-{index}" for index in range(20)],
         negative_indirect=[f"negative-indirect-{index}" for index in range(20)],
     )
-    dataset = trainer.get_data_spit(weighted_texts)
+    dataset = trainer.get_data_spit(weighted_sub_labels)
     all_data = pd.concat(
         [dataset.data_train, dataset.data_validation, dataset.data_test]
     )
 
-    assert set(all_data.loc[all_data["d/i"] == "direct", "weight"]) == {1.0}
     assert set(
         all_data.loc[
-            (all_data["p/n"] == "positive") & (all_data["d/i"] == "indirect"),
+            all_data["sub_label"] == "positive_indirect",
             "weight",
         ]
     ) == {0.75}
-    assert set(all_data.loc[all_data["p/n"] == "negative", "weight"]) == {1.0}
+    assert set(
+        all_data.loc[
+            (all_data["sub_label"] == "positive_direct")
+            | (all_data["sub_label"] == "negative_direct"),
+            "weight",
+        ]
+    ) == {1.0}
+    positive_direct_counts = dataset.counts.sub_labels["positive_direct"]
+    assert positive_direct_counts.train == sum(
+        dataset.data_train["sub_label"] == "positive_direct"
+    )
+    assert positive_direct_counts.validation == sum(
+        dataset.data_validation["sub_label"] == "positive_direct"
+    )
+    assert positive_direct_counts.test == sum(
+        dataset.data_test["sub_label"] == "positive_direct"
+    )
+    assert (
+        positive_direct_counts.train
+        + positive_direct_counts.validation
+        + positive_direct_counts.test
+        == 20
+    )
 
 
 def test_data_split_rejects_single_class_dataset() -> None:
     trainer = ArticleClassificationTrainer()
 
     with pytest.raises(ValueError, match="positive and negative"):
-        trainer.get_data_spit(Texts(positive_direct=["positive"] * 20))
+        trainer.get_data_spit(make_sub_labels(positive_direct=["positive"] * 20))
+
+
+def test_sub_label_rejects_invalid_configuration() -> None:
+    with pytest.raises(ValueError, match="target must be 0 or 1"):
+        SubLabel(name="invalid", description="Invalid target.", target=2)
+
+    with pytest.raises(ValueError, match="multiplier cannot be negative"):
+        SubLabel(
+            name="invalid",
+            description="Invalid weight.",
+            target=1,
+            weight_multiplier=-0.1,
+        )
 
 
 def test_get_data_split_includes_validation_set() -> None:
     trainer = ArticleClassificationTrainer()
-    texts = Texts(
+    sub_labels = make_sub_labels(
         positive_direct=[f"positive-{index}" for index in range(100)],
         negative_direct=[f"negative-{index}" for index in range(100)],
     )
 
-    dataset = trainer.get_data_spit(texts)
+    dataset = trainer.get_data_spit(sub_labels)
 
     assert dataset.counts.positive_train == 80
     assert dataset.counts.positive_validation == 10
@@ -230,13 +305,13 @@ def test_get_data_split_includes_validation_set() -> None:
 
 def test_get_data_split_is_reproducible() -> None:
     trainer = ArticleClassificationTrainer(random_seed=123)
-    texts = Texts(
+    sub_labels = make_sub_labels(
         positive_direct=[f"positive-{index}" for index in range(100)],
         negative_direct=[f"negative-{index}" for index in range(100)],
     )
 
-    first_dataset = trainer.get_data_spit(texts)
-    second_dataset = trainer.get_data_spit(texts)
+    first_dataset = trainer.get_data_spit(sub_labels)
+    second_dataset = trainer.get_data_spit(sub_labels)
 
     assert first_dataset.data_train.equals(second_dataset.data_train)
     assert first_dataset.data_validation.equals(second_dataset.data_validation)
@@ -245,12 +320,12 @@ def test_get_data_split_is_reproducible() -> None:
 
 def test_get_data_split_preserves_class_prevalence() -> None:
     trainer = ArticleClassificationTrainer()
-    texts = Texts(
+    sub_labels = make_sub_labels(
         positive_direct=[f"positive-{index}" for index in range(100)],
         negative_direct=[f"negative-{index}" for index in range(1000)],
     )
 
-    dataset = trainer.get_data_spit(texts)
+    dataset = trainer.get_data_spit(sub_labels)
 
     assert dataset.counts.positive_validation == 10
     assert dataset.counts.negative_validation == 100
@@ -295,7 +370,7 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     (training_data_dir / "articles_0001_labels.jsonl").write_text(
         '{"off_topic": false}\n'
     )
-    texts = Texts(
+    sub_labels = make_sub_labels(
         positive_direct=[
             f"urban cycling policy infrastructure example {index}"
             for index in range(50)
@@ -305,7 +380,7 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
         ],
     )
 
-    evaluated_model = trainer.train_model(texts)
+    evaluated_model = trainer.train_model(sub_labels)
 
     assert 0.0 <= evaluated_model.decision_threshold <= 1.0
     assert evaluated_model.metrics.validation.count == 20
@@ -331,7 +406,7 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     assert metadata["cv_folds"] == 5
     assert metadata["selection_metric"] == "average_precision"
     assert metadata["n_jobs"] == 1
-    assert metadata["metadata_schema_version"] == 1
+    assert metadata["metadata_schema_version"] == 2
     assert metadata["created_at"].endswith("Z")
     assert metadata["training_data"]["fingerprint"].startswith("sha256:")
     assert metadata["code"]["git_commit"]
@@ -339,6 +414,30 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     assert metadata["runtime"]["python"]
     assert metadata["runtime"]["scikit_learn"]
     assert metadata["runtime"]["uv_lock_sha256"].startswith("sha256:")
+    positive_direct = next(
+        evaluation
+        for evaluation in metadata["evaluations"]
+        if evaluation["label"] == "positive_direct"
+    )
+    assert positive_direct["description"] == "Direct positive test samples."
+    assert positive_direct["target"] == 1
+    assert positive_direct["weight_multiplier"] == 1.0
+    assert positive_direct["evaluation"]["test"]["count"] == 10
+    assert (
+        0.0 <= positive_direct["evaluation"]["test"]["mean_positive_probability"] <= 1.0
+    )
+    assert metadata["counts"]["sub_labels"]["positive_direct"] == {
+        "train": 30,
+        "validation": 10,
+        "test": 10,
+    }
+    assert metadata["sub_labels"][0] == {
+        "name": "positive_direct",
+        "description": "Direct positive test samples.",
+        "target": 1,
+        "weight_multiplier": 1.0,
+        "counts": {"train": 30, "validation": 10, "test": 10},
+    }
 
 
 def test_saved_model_round_trip_preserves_probabilities_and_threshold(
@@ -351,11 +450,11 @@ def test_saved_model_round_trip_preserves_probabilities_and_threshold(
     training_data_dir = Path(trainer.training_data_dir)
     training_data_dir.mkdir()
     (training_data_dir / "articles_0001.jsonl").write_text("article\n")
-    texts = Texts(
+    sub_labels = make_sub_labels(
         positive_direct=[f"urban cycling policy {index}" for index in range(50)],
         negative_direct=[f"celebrity fashion news {index}" for index in range(50)],
     )
-    evaluated_model = trainer.train_model(texts)
+    evaluated_model = trainer.train_model(sub_labels)
     trainer.save_classifier_model(None, evaluated_model)
     sample_texts = ["urban cycling infrastructure", "celebrity fashion"]
     expected_probabilities = evaluated_model.model.predict_proba(sample_texts)
@@ -437,10 +536,10 @@ def test_train_models_writes_only_eligible_current_objective_artifacts(
     objective_dir.mkdir(parents=True)
     (objective_dir / "obsolete.json").write_text("{}")
 
-    def load_data(objective_label: str | None) -> Texts:
-        return Texts()
+    def load_data(objective_label: str | None) -> list[SubLabel]:
+        return []
 
-    def train_model(_texts: Texts) -> Any:
+    def train_model(_sub_labels: list[SubLabel]) -> Any:
         return object()
 
     monkeypatch.setattr(trainer, "load_data", load_data)
