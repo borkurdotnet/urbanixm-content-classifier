@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from urbanixm_content_classifier.article_classifier import (
+    ArticleClassifier,
     ArticleClassificationTrainer,
     ObjectiveType,
     SubLabel,
@@ -15,6 +16,13 @@ from urbanixm_content_classifier.article_classifier import (
     calculate_classification_metrics,
     select_decision_threshold,
 )
+
+
+class StubArticleModel:
+    classes_ = [0, 1]
+
+    def predict_proba(self, articles: list[str]) -> list[list[float]]:
+        return [[1.0 - float(article), float(article)] for article in articles]
 
 
 def write_jsonlines(path: Path, records: list[dict[str, object]]) -> None:
@@ -361,7 +369,10 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     tmp_path: Path,
 ) -> None:
     trainer = ArticleClassificationTrainer(random_seed=123)
-    trainer.output_model_path = str(tmp_path)
+    trainer.data_dir = str(tmp_path)
+    trainer.output_model_path = str(
+        tmp_path / "classifiers" / "models" / "final" / "article_models"
+    )
     trainer.training_data_dir = str(tmp_path / "training")
     trainer.objective_type = ObjectiveType.ON_TOPIC
     training_data_dir = Path(trainer.training_data_dir)
@@ -399,7 +410,9 @@ def test_train_model_selects_threshold_and_evaluates_test_set(
     }
 
     trainer.save_classifier_model(objective_label=None, evaluated_model=evaluated_model)
-    metadata = json.loads((tmp_path / "on_topic" / "on_topic.json").read_text())
+    metadata = json.loads(
+        (Path(trainer.output_model_path) / "on_topic" / "on_topic.json").read_text()
+    )
 
     assert metadata["best_parameters"] == evaluated_model.best_parameters
     assert metadata["cv_average_precision"] == 1.0
@@ -444,7 +457,10 @@ def test_saved_model_round_trip_preserves_probabilities_and_threshold(
     tmp_path: Path,
 ) -> None:
     trainer = ArticleClassificationTrainer(random_seed=123)
-    trainer.output_model_path = str(tmp_path)
+    trainer.data_dir = str(tmp_path)
+    trainer.output_model_path = str(
+        tmp_path / "classifiers" / "models" / "final" / "article_models"
+    )
     trainer.training_data_dir = str(tmp_path / "training")
     trainer.objective_type = ObjectiveType.ON_TOPIC
     training_data_dir = Path(trainer.training_data_dir)
@@ -464,9 +480,10 @@ def test_saved_model_round_trip_preserves_probabilities_and_threshold(
         for probability in expected_probabilities[:, positive_index]
     ]
 
-    with (tmp_path / "on_topic" / "on_topic.pickle").open("rb") as model_file:
+    artifact_dir = Path(trainer.output_model_path) / "on_topic"
+    with (artifact_dir / "on_topic.pickle").open("rb") as model_file:
         loaded_model = pickle.load(model_file)
-    metadata = json.loads((tmp_path / "on_topic" / "on_topic.json").read_text())
+    metadata = json.loads((artifact_dir / "on_topic.json").read_text())
     loaded_probabilities = loaded_model.predict_proba(sample_texts)
     loaded_positive_index = list(loaded_model.classes_).index(1)
     predictions = [
@@ -477,6 +494,51 @@ def test_saved_model_round_trip_preserves_probabilities_and_threshold(
     assert loaded_probabilities.tolist() == expected_probabilities.tolist()
     assert metadata["decision_threshold"] == evaluated_model.decision_threshold
     assert predictions == expected_predictions
+
+    classifier = ArticleClassifier(
+        data_dir=str(tmp_path), objective_type=ObjectiveType.ON_TOPIC
+    )
+    results = classifier.classify(sample_texts)
+    assert [result.confidence for result in results] == list(
+        expected_probabilities[:, positive_index]
+    )
+    assert [result.decision for result in results] == [
+        bool(prediction) for prediction in expected_predictions
+    ]
+
+
+def test_article_classifier_loads_once_and_classifies_repeated_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact_dir = (
+        tmp_path / "classifiers" / "models" / "final" / "article_models" / "on_topic"
+    )
+    artifact_dir.mkdir(parents=True)
+    model_path = artifact_dir / "on_topic.pickle"
+    metadata_path = artifact_dir / "on_topic.json"
+    with model_path.open("wb") as model_file:
+        pickle.dump(StubArticleModel(), model_file)
+    metadata_path.write_text(json.dumps({"decision_threshold": 0.7}))
+    pickle_load_calls = 0
+    original_pickle_load = pickle.load
+
+    def tracked_pickle_load(model_file: Any) -> Any:
+        nonlocal pickle_load_calls
+        pickle_load_calls += 1
+        return original_pickle_load(model_file)
+
+    monkeypatch.setattr(pickle, "load", tracked_pickle_load)
+
+    classifier = ArticleClassifier(str(tmp_path), ObjectiveType.ON_TOPIC)
+    first_batch = classifier.classify(["0.69", "0.70"])
+    second_batch = classifier.classify(["0.95"])
+
+    assert pickle_load_calls == 1
+    assert [result.confidence for result in first_batch] == [0.69, 0.7]
+    assert [result.decision for result in first_batch] == [False, True]
+    assert second_batch[0].confidence == 0.95
+    assert second_batch[0].decision is True
+    assert classifier.classify([]) == []
 
 
 def test_training_data_fingerprint_is_deterministic_and_content_sensitive(

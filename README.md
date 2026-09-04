@@ -69,7 +69,7 @@ The commands can also be ran individually.
 
 ```
 uv run ruff check .
-uv run format check .
+uv run format
 uv run pyright .
 uv run pytest
 ```
@@ -151,6 +151,39 @@ text feature matrices and probability-enabled SVM fits can consume substantial
 memory. Use `--n_jobs 2` or `--n_jobs 4` to opt into bounded parallelism when
 the machine has sufficient memory. `--n_jobs -1` uses every CPU, but can cause
 joblib workers to be terminated under memory pressure on larger article sets.
+
+### Article inference
+
+The classifier discovers trained artifacts under the Urbanixm data directory.
+Create an `ArticleClassifier` once and reuse it across batches; the model and
+its learned decision threshold are loaded by the constructor, not by each call
+to `classify`.
+
+```python
+from urbanixm_content_classifier import ArticleClassifier, ObjectiveType
+
+classifier = ArticleClassifier(
+	"/path/to/urbanixm-data",
+	ObjectiveType.ON_TOPIC,
+)
+
+first_results = classifier.classify(
+	[
+		"An article about protected cycle lanes.",
+		"A celebrity fashion article.",
+	]
+)
+second_results = classifier.classify(["An article about housing policy."])
+
+for result in first_results + second_results:
+	print(result.confidence, result.decision)
+```
+
+Each result is aligned with the input article at the same list position.
+`confidence` is the model's positive-class probability, and `decision` is true
+when that probability is greater than or equal to the threshold selected from
+the validation data during training. An empty input list returns an empty result
+list.
 
 ### Quotes
 

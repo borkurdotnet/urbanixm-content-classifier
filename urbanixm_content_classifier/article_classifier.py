@@ -37,12 +37,116 @@ DEFAULT_RANDOM_SEED = 42
 METADATA_SCHEMA_VERSION = 2
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
+MODEL_PATH = os.path.join("classifiers", "models", "final", "article_models")
+
 
 class ObjectiveType(Enum):
     ON_TOPIC = "on_topic"
     QUOTABLE = "quotable"
     TOPICS = "topics"
     PLACES = "places"
+
+
+def get_model_output_path(data_dir: str) -> str:
+    return os.path.join(data_dir, MODEL_PATH)
+
+
+def get_model_filename(
+    objective_type: ObjectiveType, objective_label: str | None, metadata: bool
+) -> str:
+    model_meta_filename = objective_type.value
+    if objective_label is not None:
+        model_meta_filename += f"_{objective_label}"
+    model_meta_filename += ".json" if metadata else ".pickle"
+    return model_meta_filename
+
+
+def get_model_path(
+    data_dir: str,
+    objective_type: ObjectiveType,
+    objective_label: str | None,
+    metadata: bool,
+) -> str:
+    model_meta_path = os.path.join(
+        get_model_output_path(data_dir=data_dir), objective_type.value
+    )
+    model_meta_path = os.path.join(
+        model_meta_path,
+        get_model_filename(
+            objective_type=objective_type,
+            objective_label=objective_label,
+            metadata=metadata,
+        ),
+    )
+
+    return model_meta_path
+
+
+@dataclass(frozen=True)
+class ArticleClassification:
+    confidence: float
+    decision: bool
+
+
+class ArticleClassifier:
+    def __init__(self, data_dir: str, objective_type: ObjectiveType) -> None:
+        resolved_model_path = Path(
+            get_model_path(
+                data_dir=data_dir,
+                objective_type=objective_type,
+                objective_label=None,
+                metadata=False,
+            )
+        )
+
+        resolved_metadata_path = Path(
+            get_model_path(
+                data_dir=data_dir,
+                objective_type=objective_type,
+                objective_label=None,
+                metadata=True,
+            )
+        )
+
+        with resolved_model_path.open("rb") as model_file:
+            self._model = pickle.load(model_file)
+        with resolved_metadata_path.open() as metadata_file:
+            metadata = json.load(metadata_file)
+
+        try:
+            self.decision_threshold = float(metadata["decision_threshold"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                f"Invalid decision threshold in {resolved_metadata_path}"
+            ) from error
+        if not 0.0 <= self.decision_threshold <= 1.0:
+            raise ValueError(
+                f"Decision threshold must be between 0 and 1: {self.decision_threshold}"
+            )
+
+        try:
+            self._positive_class_index = list(self._model.classes_).index(1)
+        except (AttributeError, ValueError) as error:
+            raise ValueError(
+                "Article model does not contain positive class 1"
+            ) from error
+
+    def classify(self, articles: list[str]) -> list[ArticleClassification]:
+        if not articles:
+            return []
+
+        probabilities = self._model.predict_proba(articles)
+        positive_probabilities = [
+            float(probability[self._positive_class_index])
+            for probability in probabilities
+        ]
+        return [
+            ArticleClassification(
+                confidence=confidence,
+                decision=confidence >= self.decision_threshold,
+            )
+            for confidence in positive_probabilities
+        ]
 
 
 @dataclass
@@ -535,9 +639,7 @@ class ArticleClassificationTrainer(object):
         )
 
         # Set output model path
-        self.output_model_path = os.path.join(
-            self.data_dir, "classifiers", "models", "final", "article_models"
-        )
+        self.output_model_path = get_model_output_path(self.data_dir)
 
     def load_data(self, objective_label: str | None) -> list[SubLabel]:
         """
@@ -1122,22 +1224,25 @@ class ArticleClassificationTrainer(object):
             "evaluations": [e.to_dict() for e in evaluated_model.evaluations],
             "metrics": evaluated_model.metrics.to_dict(),
         }
-        model_meta_filename = self.objective_type.value
-        if objective_label is not None:
-            model_meta_filename += f"_{objective_label}"
-        model_meta_filename += ".json"
-        model_meta_path = os.path.join(
-            self.output_model_path, self.objective_type.value
+        model_meta_path = get_model_path(
+            data_dir=self.data_dir,
+            objective_type=self.objective_type,
+            objective_label=objective_label,
+            metadata=True,
         )
-        os.makedirs(model_meta_path, exist_ok=True)
-        model_meta_path = os.path.join(model_meta_path, model_meta_filename)
+        os.makedirs(os.path.dirname(model_meta_path), exist_ok=True)
 
         with open(model_meta_path, "w") as fout:
             fout.write(json.dumps(metadata, indent=2))
             fout.close()
 
         # Save classifier model pickle
-        model_pickle_path = model_meta_path.replace(".json", ".pickle")
+        model_pickle_path = get_model_path(
+            data_dir=self.data_dir,
+            objective_type=self.objective_type,
+            objective_label=objective_label,
+            metadata=False,
+        )
         with open(model_pickle_path, "wb") as fh:
             pickle.dump(evaluated_model.model, fh)
             fh.close()
